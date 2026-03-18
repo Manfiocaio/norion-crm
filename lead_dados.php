@@ -1,84 +1,100 @@
 <?php
-// ============================================================
-// ARQUIVO: lead_dados.php
-// O QUE FAZ: Retorna os dados de um lead em formato JSON
-// COMO FUNCIONA: O JavaScript chama este arquivo via fetch()
-// e recebe os dados para montar o painel lateral
-// ============================================================
 session_start();
-if (!isset($_SESSION['usuario_logado'])) {
+require_once 'config/db.php';
+require_once 'config/permissoes.php';
+require_once 'config/log.php';
+
+// Retorna JSON — nunca redireciona
+header('Content-Type: application/json; charset=UTF-8');
+
+// Verifica login sem redirecionar
+if (!esta_logado()) {
     http_response_code(401);
-    // http_response_code() define o código HTTP da resposta
-    // 401 = não autorizado
     echo json_encode(['erro' => 'Não autorizado']);
     exit();
 }
 
-require_once 'config/db.php';
-
-// Lendo o ID da URL: lead_dados.php?id=5
 $id = isset($_GET['id']) && is_numeric($_GET['id']) ? (int)$_GET['id'] : 0;
-
 if ($id <= 0) {
-    http_response_code(400); // 400 = requisição inválida
+    http_response_code(400);
     echo json_encode(['erro' => 'ID inválido']);
     exit();
 }
 
-// ── Dados do lead ──
+// ── Lead ──
 $r = mysqli_query($conexao, "SELECT * FROM leads WHERE id = $id LIMIT 1");
-if (mysqli_num_rows($r) === 0) {
-    http_response_code(404); // 404 = não encontrado
+if (!$r || mysqli_num_rows($r) === 0) {
+    http_response_code(404);
     echo json_encode(['erro' => 'Lead não encontrado']);
     exit();
 }
 $lead = mysqli_fetch_assoc($r);
 
 // ── Histórico de contatos ──
+$historico = [];
 $r2 = mysqli_query($conexao,
     "SELECT * FROM historico_contatos WHERE lead_id = $id ORDER BY data_hora DESC"
 );
-$historico = [];
-while ($h = mysqli_fetch_assoc($r2)) {
-    $historico[] = $h;
-}
+while ($h = mysqli_fetch_assoc($r2)) { $historico[] = $h; }
 
 // ── Documentos ──
+$documentos = [];
 $r3 = mysqli_query($conexao,
     "SELECT * FROM documentos WHERE lead_id = $id ORDER BY criado_em DESC"
 );
-$documentos = [];
 while ($d = mysqli_fetch_assoc($r3)) {
-    // Calculando tamanho legível aqui no PHP para não precisar fazer no JS
     $bytes = (int)$d['tamanho'];
-    if ($bytes >= 1048576)     $tam = round($bytes / 1048576, 1) . ' MB';
-    elseif ($bytes >= 1024)    $tam = round($bytes / 1024, 1)    . ' KB';
-    else                       $tam = $bytes . ' B';
-
+    if ($bytes >= 1048576)  $tam = round($bytes/1048576, 1) . ' MB';
+    elseif ($bytes >= 1024) $tam = round($bytes/1024, 1)    . ' KB';
+    else                    $tam = $bytes . ' B';
     $ext = strtolower(pathinfo($d['nome_original'], PATHINFO_EXTENSION));
-
     $documentos[] = [
-        'id'            => $d['id'],
-        'nome_original' => $d['nome_original'],
-        'nome_arquivo'  => $d['nome_arquivo'],
-        'tamanho_fmt'   => $tam,
-        'extensao'      => $ext,
-        'criado_em'     => date('d/m/Y', strtotime($d['criado_em'])),
+        'id'           => $d['id'],
+        'nome_original'=> $d['nome_original'],
+        'nome_arquivo' => $d['nome_arquivo'],
+        'tamanho_fmt'  => $tam,
+        'extensao'     => $ext,
+        'criado_em'    => date('d/m/Y', strtotime($d['criado_em'])),
     ];
 }
 
-// ── Montando a resposta ──
-// header() define o tipo de conteúdo da resposta
-// application/json diz ao JS que vai receber JSON
-header('Content-Type: application/json; charset=UTF-8');
+// ── Log de atividades ──
+// Verifica se a tabela existe antes de consultar
+$log = [];
+$tabela_ok = mysqli_query($conexao, "SHOW TABLES LIKE 'log_atividades'");
+if ($tabela_ok && mysqli_num_rows($tabela_ok) > 0) {
+    $r4 = mysqli_query($conexao,
+        "SELECT usuario, acao, detalhe, criado_em FROM log_atividades
+         WHERE lead_id = $id ORDER BY criado_em DESC LIMIT 30"
+    );
+    if ($r4) {
+        while ($entry = mysqli_fetch_assoc($r4)) {
+            $dt   = new DateTime($entry['criado_em']);
+            $ago  = new DateTime();
+            $diff = $ago->diff($dt);
+            if ($diff->days === 0)     $quando = 'Hoje às '     . $dt->format('H:i');
+            elseif ($diff->days === 1) $quando = 'Ontem às '    . $dt->format('H:i');
+            elseif ($diff->days < 7)  $quando = 'Há ' . $diff->days . ' dias';
+            else                       $quando = $dt->format('d/m/Y H:i');
 
-// json_encode() converte o array PHP em string JSON
+            $cor = cor_log($entry['acao']);
+            $log[] = [
+                'usuario' => $entry['usuario'],
+                'acao'    => $entry['acao'],
+                'texto'   => texto_acao($entry['acao']),
+                'detalhe' => $entry['detalhe'],
+                'quando'  => $quando,
+                'bg'      => $cor['bg'],
+                'fg'      => $cor['fg'],
+            ];
+        }
+    }
+}
+
 echo json_encode([
     'lead'      => $lead,
     'historico' => $historico,
     'documentos'=> $documentos,
+    'log'       => $log,
 ], JSON_UNESCAPED_UNICODE);
-// JSON_UNESCAPED_UNICODE = mantém acentos como são (ã, é, ç)
-// sem isso, vira \u00e3, \u00e9 etc.
-
 exit();

@@ -16,30 +16,30 @@
 /* ── Variáveis globais de design ────────────────────────── */
 :root {
     /* Cores principais */
-    --azul:        #008CFF;   /* cor de destaque da Norion */
-    --azul-hover:  #0070CC;   /* azul mais escuro para hover */
-    --azul-light:  #E8F4FF;   /* azul bem claro para fundos */
-    --azul-mid:    #B8DCFF;   /* azul médio para bordas azuis */
+    --azul:        #008CFF;
+    --azul-hover:  #0070CC;
+    --azul-light:  #E8F4FF;
+    --azul-mid:    #B8DCFF;
 
     /* Sidebar escura */
-    --sidebar-bg:      #111318;  /* fundo do menu lateral */
-    --sidebar-hover:   #1C1F27;  /* hover nos itens do menu */
-    --sidebar-active:  #1A2333;  /* item ativo no menu */
-    --sidebar-border:  #1E2229;  /* borda sutil entre itens */
-    --sidebar-text:    #8A90A0;  /* texto inativo no menu */
-    --sidebar-text-on: #FFFFFF;  /* texto ativo/hover no menu */
+    --sidebar-bg:      #111318;
+    --sidebar-hover:   #1C1F27;
+    --sidebar-active:  #1A2333;
+    --sidebar-border:  #1E2229;
+    --sidebar-text:    #8A90A0;
+    --sidebar-text-on: #FFFFFF;
 
     /* Conteúdo claro */
-    --bg:          #F4F6F9;   /* fundo geral da página */
-    --surface:     #FFFFFF;   /* cards, painéis */
-    --surface-2:   #F9FAFB;   /* fundo secundário (inputs, etc) */
-    --border:      #E8EAED;   /* bordas gerais */
-    --border-2:    #D1D5DB;   /* bordas com mais ênfase */
+    --bg:          #F4F6F9;
+    --surface:     #FFFFFF;
+    --surface-2:   #F9FAFB;
+    --border:      #E8EAED;
+    --border-2:    #D1D5DB;
 
     /* Texto */
-    --text-1:  #0D1117;  /* texto principal */
-    --text-2:  #4B5563;  /* texto secundário */
-    --text-3:  #9CA3AF;  /* texto muito discreto (placeholders) */
+    --text-1:  #0D1117;
+    --text-2:  #4B5563;
+    --text-3:  #9CA3AF;
 
     /* Status / semântica */
     --verde:        #10B981;
@@ -55,11 +55,53 @@
     --cinza-text:   #374151;
 
     /* Layout */
-    --sidebar-w: 240px;  /* largura do menu lateral */
-    --radius:    10px;   /* arredondamento padrão */
-    --radius-lg: 14px;   /* arredondamento em cards */
+    --sidebar-w: 240px;
+    --radius:    10px;
+    --radius-lg: 14px;
     --shadow:    0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
     --shadow-md: 0 4px 6px rgba(0,0,0,0.06), 0 2px 4px rgba(0,0,0,0.04);
+}
+
+/* ── Dark Mode ──────────────────────────────────────────── */
+/* Ativado pela classe .dark no <html> */
+html.dark {
+    --bg:          #0D1117;
+    --surface:     #161B22;
+    --surface-2:   #1C2130;
+    --border:      #21262D;
+    --border-2:    #30363D;
+
+    --text-1:  #E6EDF3;
+    --text-2:  #8B949E;
+    --text-3:  #484F58;
+
+    --azul-light: #1A2A3A;
+    --azul-mid:   #1F3A5A;
+
+    --verde-light:   #0D2B22;
+    --verde-text:    #3FB950;
+    --amarelo-light: #2B2000;
+    --amarelo-text:  #E3B341;
+    --vermelho-light:#2B0D0D;
+    --vermelho-text: #F85149;
+    --cinza-light:   #1C2130;
+    --cinza-text:    #8B949E;
+
+    --shadow:    0 1px 3px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3);
+    --shadow-md: 0 4px 6px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.3);
+
+    /* Sidebar fica um pouco mais clara no dark */
+    --sidebar-bg:     #0D1117;
+    --sidebar-hover:  #161B22;
+    --sidebar-active: #1A2333;
+    --sidebar-border: #21262D;
+}
+
+/* Inputs e selects ficam com fundo correto no dark */
+html.dark input,
+html.dark select,
+html.dark textarea {
+    color-scheme: dark;
 }
 
 /* ── Reset e base ───────────────────────────────────────── */
@@ -86,42 +128,42 @@ body {
     background: var(--sidebar-bg);
     display: flex;
     flex-direction: column;
-    /* flex-direction: column = itens empilhados verticalmente */
     position: fixed;
-    /* position: fixed = fica fixo mesmo ao rolar a página */
     top: 0;
     left: 0;
     z-index: 100;
     border-right: 1px solid var(--sidebar-border);
+    /* Animação suave ao recolher/expandir */
+    transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* Logo no topo da sidebar */
+/* Logos — transição cruzada */
 .sidebar-logo {
-    padding: 24px 20px 20px;
+    padding: 20px;
     border-bottom: 1px solid var(--sidebar-border);
     display: flex;
     align-items: center;
-    gap: 10px;
+    justify-content: flex-start;
+    height: 72px;
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
 }
-.sidebar-logo img {
-    height: 28px;
-    width: auto;
+.logo-img-normal,
+.logo-img-simples {
+    position: absolute;
+    transition: opacity 0.3s ease, transform 0.3s ease;
 }
-/* Fallback caso a imagem não carregue ainda */
-.sidebar-logo-text {
-    font-size: 18px;
-    font-weight: 800;
-    color: #FFFFFF;
-    letter-spacing: -0.3px;
+.logo-img-normal {
+    height: 28px; width: auto;
+    opacity: 1;
+    transform: translateX(0) scale(1);
 }
-.sidebar-logo-text span {
-    color: var(--azul);
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 2px;
-    display: block;
-    margin-top: 1px;
-    text-transform: uppercase;
+.logo-img-simples {
+    height: 30px; width: auto;
+    opacity: 0;
+    transform: scale(0.7);
+    left: 50%; margin-left: -15px; /* centraliza horizontalmente */
 }
 
 /* Seção de navegação */
@@ -224,11 +266,12 @@ body {
 /* ── Conteúdo principal ── */
 .main-content {
     margin-left: var(--sidebar-w);
-    /* margin-left = empurra o conteúdo para não ficar atrás da sidebar */
     flex: 1;
     min-height: 100vh;
     display: flex;
     flex-direction: column;
+    /* Acompanha a animação da sidebar */
+    transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* Topbar dentro do conteúdo */
@@ -431,6 +474,10 @@ textarea.form-control {
 .badge-novo::before      { background: var(--azul); }
 .badge-contato   { background: var(--amarelo-light);  color: var(--amarelo-text); }
 .badge-contato::before   { background: var(--amarelo); }
+.badge-proposta  { background: #EDE9FE; color: #4C1D95; }
+.badge-proposta::before  { background: #7C3AED; }
+.badge-negociacao{ background: #FFF7ED; color: #92400E; }
+.badge-negociacao::before{ background: #F97316; }
 .badge-fechado   { background: var(--verde-light);    color: var(--verde-text); }
 .badge-fechado::before   { background: var(--verde); }
 .badge-perdido   { background: var(--vermelho-light); color: var(--vermelho-text); }
@@ -569,19 +616,27 @@ tbody tr:hover { background: var(--surface-2); }
 }
 .form-footer-left { display: flex; gap: 10px; }
 
+
+/* ── Grids do dashboard ── */
+.dash-grid-4 {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+}
+.dash-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
 /* ============================================================
    RESPONSIVIDADE — Mobile & Tablet
-   Breakpoints:
-   - Mobile:  até 768px
-   - Tablet:  769px – 1024px
-   - Desktop: acima de 1024px
    ============================================================ */
 
-/* ── Botão hamburguer (mobile) ── */
+/* ── Botão hamburguer ── */
 .btn-menu {
     display: none;
-    align-items: center;
-    justify-content: center;
+    align-items: center; justify-content: center;
     width: 36px; height: 36px;
     border-radius: 8px;
     background: none;
@@ -589,166 +644,342 @@ tbody tr:hover { background: var(--surface-2); }
     cursor: pointer;
     flex-shrink: 0;
     transition: background 0.15s;
+    margin-right: 4px;
 }
 .btn-menu:hover { background: var(--surface-2); }
-.btn-menu svg { width: 18px; height: 18px; stroke: var(--text-2); }
+.btn-menu svg   { width: 18px; height: 18px; stroke: var(--text-2); pointer-events: none; }
 
-/* Overlay escuro atrás da sidebar no mobile */
+/* ── Overlay da sidebar ── */
 .sidebar-overlay {
     display: none;
     position: fixed;
     inset: 0;
-    background: rgba(0,0,0,0.45);
+    background: rgba(0,0,0,0.5);
     z-index: 99;
+    backdrop-filter: blur(2px);
 }
 .sidebar-overlay.ativo { display: block; }
 
-/* ── Tablet (769px – 1024px) ── */
+/* ── Tablet (até 1024px) ── */
 @media (max-width: 1024px) {
-
-    /* Sidebar mais estreita */
-    :root { --sidebar-w: 200px; }
-
+    :root { --sidebar-w: 210px; }
     .page-content { padding: 18px 20px; }
     .topbar       { padding: 0 20px; }
-
-    /* Grids de 4 colunas viram 2 */
-    .metric-cards-4 { grid-template-columns: repeat(2, 1fr) !important; }
-
-    /* Tabelas ficam com scroll se necessário */
     .table-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 }
 
 /* ── Mobile (até 768px) ── */
 @media (max-width: 768px) {
 
-    /* ── Sidebar vira drawer deslizante ── */
+    /* Sidebar vira drawer */
+    :root { --sidebar-w: 0px; }
+
     .sidebar {
-        transform: translateX(-100%);
-        /* Começa fora da tela pela esquerda */
+        width: 265px !important;
+        transform: translateX(-265px);
         transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
         z-index: 100;
-        width: 260px !important;
     }
-    .sidebar.aberta {
-        transform: translateX(0);
-        /* Desliza para dentro */
-    }
+    .sidebar.aberta { transform: translateX(0); }
 
-    /* Conteúdo ocupa tudo (sem margin da sidebar) */
+    /* Conteúdo ocupa tudo */
     .main-content { margin-left: 0 !important; }
 
-    /* Mostra o botão hamburguer */
-    .btn-menu { display: flex; }
+    /* Mostra hamburguer */
+    .btn-menu { display: flex !important; }
 
-    /* Topbar mobile */
-    .topbar {
-        padding: 0 14px;
-        height: 52px;
-        gap: 10px;
-    }
+    /* Topbar */
+    .topbar        { padding: 0 12px; height: 52px; gap: 8px; }
     .topbar-titulo { font-size: 14px; }
     .topbar-acoes  { gap: 6px; }
+    .topbar-acoes .btn { font-size: 11px; padding: 4px 9px; }
 
-    /* Esconde textos longos na topbar */
-    .topbar-acoes .btn-sm { font-size: 11px; padding: 5px 9px; }
+    /* Esconde textos de botões secundários */
+    .topbar-acoes .btn-secondary .txt-desktop { display: none; }
 
     /* Página */
-    .page-content { padding: 14px 14px; }
+    .page-content { padding: 12px; }
 
-    /* ── Grids colapsam para 1 coluna ── */
-    .grid-2 { grid-template-columns: 1fr !important; gap: 10px; }
-    .grid-3 { grid-template-columns: 1fr !important; gap: 10px; }
+    /* Cards */
+    .card { padding: 14px 14px; }
 
-    /* Cards de métrica: 2 colunas no mobile */
-    /* (sobrescreve o 4-colunas do desktop) */
-    div[style*="grid-template-columns:repeat(4"] {
+    /* Grids — 1 coluna */
+    .grid-2,
+    .grid-3 {
+        grid-template-columns: 1fr !important;
+        gap: 10px !important;
+    }
+
+    /* Métricas do dashboard: 2 colunas */
+    .dash-metrics-row {
         grid-template-columns: repeat(2, 1fr) !important;
         gap: 10px !important;
     }
 
-    /* Kanban: scroll horizontal */
-    .kanban-wrap  { gap: 10px; padding-bottom: 14px; }
-    .kanban-coluna{ width: 240px; }
+    /* Grids do dashboard */
+    .dash-grid-4 {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 10px !important;
+    }
+    .dash-grid-2 {
+        grid-template-columns: 1fr !important;
+        gap: 12px !important;
+    }
 
-    /* Tabelas: scroll horizontal */
+    /* Kanban */
+    .kanban-wrap   { gap: 10px; }
+    .kanban-coluna { width: 220px; }
+
+    /* Tabelas */
     .table-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    table { min-width: 540px; }
-
-    /* Esconde colunas menos importantes em telas pequenas */
-    .col-esconder-mobile { display: none !important; }
+    table            { min-width: 500px; }
 
     /* Formulários */
     .form-footer {
         flex-direction: column;
         align-items: stretch;
-        gap: 10px;
-    }
-    .form-footer-left {
-        flex-direction: column;
         gap: 8px;
     }
+    .form-footer-left  { flex-direction: column; gap: 8px; }
     .form-footer .btn,
-    .form-footer-left .btn { width: 100%; justify-content: center; }
-
-    /* Cards menores */
-    .card { padding: 16px 14px; }
-
-    /* View toggle de leads */
-    .view-toggle .view-btn span { display: none; }
-    /* Esconde o texto, mostra só o ícone */
+    .form-footer-left .btn { width: 100% !important; justify-content: center; }
 
     /* Filtros: scroll horizontal */
     .filtros-wrap {
-        flex-wrap: nowrap;
+        flex-wrap: nowrap !important;
         overflow-x: auto;
-        gap: 6px;
-        padding: 10px 14px;
         -webkit-overflow-scrolling: touch;
+        padding: 10px 12px;
+        gap: 6px;
+        scrollbar-width: none;
     }
-    .filtros-wrap .filtros-contagem { display: none; }
+    .filtros-wrap::-webkit-scrollbar { display: none; }
+    .filtros-contagem { display: none !important; }
 
     /* Barra de ações em massa */
-    .barra-massa { flex-wrap: wrap; gap: 8px; }
-    .barra-massa-acoes { flex-wrap: wrap; gap: 6px; margin-left: 0; width: 100%; }
-    .barra-massa-acoes .btn { flex: 1; justify-content: center; font-size: 11px; }
+    .barra-massa        { flex-wrap: wrap; gap: 8px; }
+    .barra-massa-acoes  { flex-wrap: wrap; width: 100%; margin-left: 0; gap: 6px; }
+    .barra-massa-acoes .btn { flex: 1; min-width: 0; justify-content: center; font-size: 11px; }
 
     /* Drawer de lead: largura total */
     .drawer { width: 100% !important; }
 
-    /* Dashboard: grids inline de 2 colunas */
-    div[style*="grid-template-columns:1fr 1fr"] {
-        grid-template-columns: 1fr !important;
-    }
-
     /* Perfil */
-    .perfil-header { flex-direction: column; align-items: flex-start; gap: 14px; }
-    .perfil-acoes  { flex-direction: row; width: 100%; }
-    .info-grid     { grid-template-columns: 1fr !important; }
-    .perms-grade   { grid-template-columns: 1fr 1fr !important; }
+    .perfil-header     { flex-direction: column; gap: 14px; }
+    .perfil-acoes      { flex-direction: row !important; width: 100%; }
+    .info-grid         { grid-template-columns: 1fr !important; }
+    .perms-grade       { grid-template-columns: 1fr 1fr !important; }
 
     /* Colaboradores */
-    .perm-grid     { grid-template-columns: 1fr 1fr !important; }
-    .colab-footer  { flex-direction: column; gap: 10px; }
+    .perm-grid         { grid-template-columns: 1fr 1fr !important; }
+    .colab-footer      { flex-direction: column; gap: 8px; }
     .colab-footer .btn { width: 100%; justify-content: center; }
 
-    /* Steps de cadastro */
+    /* Proposta/etiqueta */
+    .proposta-grid     { grid-template-columns: 1fr 1fr !important; }
+
+    /* View toggle de leads — só ícone */
+    .view-btn span:not(.txt-icone) { display: none; }
+
+    /* Steps */
     .steps { flex-wrap: wrap; }
 
-    /* Proposta/etiqueta grid */
-    .proposta-grid { grid-template-columns: 1fr 1fr !important; }
-
-    /* Alert mais compacto */
+    /* Alert */
     .alert { font-size: 12px; }
+
+    /* Abas */
+    .abas-wrap    { flex-wrap: nowrap; overflow-x: auto; gap: 0; scrollbar-width: none; }
+    .abas-wrap::-webkit-scrollbar { display: none; }
+    .aba-btn      { white-space: nowrap; font-size: 12px; }
+
+    /* Métricas inline no dashboard */
+    .metric-card  { padding: 14px 14px; }
+    .metric-value { font-size: 22px !important; }
+    .metric-label { font-size: 10px; }
 }
 
-/* ── Telas muito pequenas (até 400px) ── */
-@media (max-width: 400px) {
+/* ── Muito pequeno (até 420px) ── */
+@media (max-width: 420px) {
     .topbar-titulo { font-size: 13px; }
-    .metric-value  { font-size: 20px !important; }
-    div[style*="grid-template-columns:repeat(4"] {
-        grid-template-columns: 1fr !important;
+    .page-content  { padding: 10px; }
+    .metric-value  { font-size: 18px !important; }
+}
+
+/* ── Toggle de dark mode ─────────────────────────────────── */
+/* ── Botão de tema ── */
+.btn-tema {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.btn-tema:hover { background: var(--surface-2); }
+
+/* ── Sidebar retrátil ─────────────────────────────────────── */
+:root { --sidebar-mini: 60px; }
+
+/* Botão de recolher — fica no canto direito da sidebar */
+.sidebar-toggle-btn {
+    position: absolute;
+    top: 18px;
+    right: -11px;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 1px solid var(--border-2);
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 200;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+    transition: background 0.15s, border-color 0.15s;
+    flex-shrink: 0;
+}
+.sidebar-toggle-btn:hover { background: var(--azul); border-color: var(--azul); }
+.sidebar-toggle-btn:hover svg { stroke: white; }
+.sidebar-toggle-btn svg {
+    width: 11px; height: 11px;
+    stroke: var(--text-3);
+    transition: stroke 0.15s, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Logos — transição cruzada */
+.logo-img-normal,
+.logo-img-simples {
+    transition: opacity 0.25s ease, transform 0.25s ease;
+    position: absolute;
+}
+.logo-img-normal  { opacity: 1; transform: scale(1); }
+.logo-img-simples { opacity: 0; transform: scale(0.8); }
+.sidebar-logo { position: relative; }
+
+/* Estado mini — só aplica em desktop */
+@media (min-width: 769px) {
+
+    html.sidebar-mini .sidebar {
+        width: var(--sidebar-mini) !important;
     }
-    .perms-grade   { grid-template-columns: 1fr !important; }
-    .perm-grid     { grid-template-columns: 1fr !important; }
+    html.sidebar-mini .main-content {
+        margin-left: var(--sidebar-mini) !important;
+    }
+
+    /* Troca de logo — fade out normal, fade in simples */
+    html.sidebar-mini .logo-img-normal {
+        opacity: 0;
+        transform: translateX(-10px) scale(0.8);
+    }
+    html.sidebar-mini .logo-img-simples {
+        opacity: 1;
+        transform: scale(1);
+    }
+    html.sidebar-mini .sidebar-logo {
+        justify-content: center;
+        padding: 0;
+    }
+    /* Linha divisória sutil no lugar dos nav-section-label */
+    html.sidebar-mini .nav-section-label {
+        opacity: 0 !important;
+        height: 0 !important;
+        overflow: hidden !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+    html.sidebar-mini .nav-section-label[style],
+    html.sidebar-mini .nav-section-label + .nav-section-label { display: none !important; }
+
+    html.sidebar-mini .nav-link > span,
+    html.sidebar-mini #btn-tema-sb {
+        opacity: 0;
+        pointer-events: none;
+        width: 0; overflow: hidden;
+    }
+
+    /* Linha divisória sutil antes da seção Conta */
+    html.sidebar-mini a[href="perfil.php"] {
+        border-top: 1px solid var(--sidebar-border);
+        margin-top: 6px;
+        padding-top: 16px;
+    }
+    html.sidebar-mini .nav-link > span[style*="background"] {
+        display: none !important;
+    }
+    html.sidebar-mini .logo-fallback { display: none !important; }
+
+    /* Logo centralizada */
+    html.sidebar-mini .sidebar-logo {
+        padding: 14px 0;
+        justify-content: center;
+        height: 68px; /* mesma altura para não pular */
+    }
+
+    html.sidebar-mini .nav-link .nav-icon {
+        width: 18px; height: 18px; opacity: 0.7;
+    }
+    html.sidebar-mini .nav-link.ativo .nav-icon,
+    html.sidebar-mini .nav-link:hover .nav-icon { opacity: 1; }
+
+    /* Tooltip ao hover */
+    html.sidebar-mini .sidebar-nav { overflow: visible; }
+    html.sidebar-mini .sidebar     { overflow: visible; }
+
+    html.sidebar-mini .nav-link::after {
+        content: attr(data-label);
+        position: absolute;
+        left: calc(var(--sidebar-mini) + 4px);
+        top: 50%;
+        transform: translateY(-50%);
+        background: #1C1F27;
+        color: #E6EDF3;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 5px 12px;
+        border-radius: 7px;
+        white-space: nowrap;
+        opacity: 0;
+        pointer-events: none;
+        z-index: 9999;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        transition: opacity 0.15s;
+    }
+    html.sidebar-mini .nav-link:hover::after { opacity: 1; }
+
+    /* Rodapé mini — avatar centralizado de forma definitiva */
+    html.sidebar-mini .sidebar-footer {
+        padding: 0 !important;
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+    }
+    html.sidebar-mini .sidebar-user {
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+        padding: 12px 0 !important;
+        gap: 0 !important;
+        width: 100% !important;
+        border-radius: 0 !important;
+    }
+    /* Esconde tudo exceto o avatar */
+    html.sidebar-mini .sidebar-user-info,
+    html.sidebar-mini #btn-tema-sb { display: none !important; }
+    html.sidebar-mini .sidebar-avatar {
+        margin: 0 !important;
+        flex-shrink: 0 !important;
+    }
+
+    /* Nav-links mini — ícone exatamente no centro */
+    /* padding: 0 é essencial — qualquer padding lateral quebra o centro */
+    html.sidebar-mini .nav-link {
+        justify-content: center;
+        padding: 10px 0;
+        gap: 0;
+        position: relative;
+        overflow: visible;
+    }
+
+    /* Seta do botão vira para a direita quando mini */
+    html.sidebar-mini .sidebar-toggle-btn svg { transform: rotate(180deg); }
 }

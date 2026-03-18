@@ -6,6 +6,7 @@
 session_start();
 require_once 'config/db.php';
 require_once 'config/permissoes.php';
+require_once 'config/log.php';
 requer_permissao('ver_leads');
 $pagina_atual = 'leads';
 $pode_editar_leads = tem_permissao('editar_leads');
@@ -17,10 +18,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_status'])) 
     $valor_venda = str_replace(',', '.', trim($_POST['valor_venda'] ?? '0'));
     $valor_venda = (is_numeric($valor_venda) && $valor_venda > 0) ? (float)$valor_venda : 0;
 
-    $status_validos = ['novo','em_contato','fechado','perdido'];
+    $status_validos = ['novo','em_contato','proposta_enviada','negociacao','fechado','perdido'];
     if (!in_array($novo_status, $status_validos)) {
         http_response_code(400); echo json_encode(['erro'=>'inválido']); exit();
     }
+
+    // Pega status anterior para o log
+    $ant_r       = mysqli_query($conexao, "SELECT status FROM leads WHERE id=$lead_id");
+    $status_ant  = mysqli_fetch_assoc($ant_r)['status'] ?? '';
 
     mysqli_query($conexao, "UPDATE leads SET status='$novo_status' WHERE id=$lead_id");
 
@@ -40,9 +45,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_status'])) 
         } else {
             mysqli_query($conexao, "UPDATE vendas SET valor=$valor_venda WHERE lead_id=$lead_id");
         }
+        registrar_log($conexao, $lead_id, 'fechou',
+            "Negócio fechado por R$ " . number_format($valor_venda, 2, ',', '.'));
     } elseif ($novo_status !== 'fechado') {
         mysqli_query($conexao, "DELETE FROM vendas WHERE lead_id=$lead_id");
         mysqli_query($conexao, "UPDATE leads SET valor=0 WHERE lead_id=$lead_id");
+        // Log de mudança de status via kanban
+        $labels = ['novo'=>'Novo','em_contato'=>'Em contato','proposta_enviada'=>'Proposta enviada',
+                   'negociacao'=>'Negociação','fechado'=>'Fechado','perdido'=>'Perdido'];
+        $de   = $labels[$status_ant]  ?? $status_ant;
+        $para = $labels[$novo_status] ?? $novo_status;
+        registrar_log($conexao, $lead_id, 'status_alterado', "\"$de\" → \"$para\" (kanban)");
     }
 
     header('Content-Type: application/json');
@@ -65,25 +78,88 @@ $status = trim($_GET['status'] ?? '');
 $origem = trim($_GET['origem'] ?? '');
 $etiq   = trim($_GET['etiqueta'] ?? '');
 
+// ── Ordenação ──
+// Colunas permitidas — whitelist para evitar SQL injection
+$colunas_permitidas = ['nome', 'status', 'criado_em', 'valor', 'possivel_ganho'];
+$ordem    = in_array($_GET['ordem'] ?? '', $colunas_permitidas) ? $_GET['ordem'] : 'criado_em';
+$direcao  = ($_GET['dir'] ?? 'desc') === 'asc' ? 'asc' : 'desc';
+// Inverso para o link do cabeçalho — ao clicar inverte a direção
+$dir_inv  = $direcao === 'asc' ? 'desc' : 'asc';
+
 $where = "WHERE 1=1";
 if (!empty($busca))  { $b = mysqli_real_escape_string($conexao,$busca);  $where .= " AND nome LIKE '%$b%'"; }
 if (!empty($status)) { $s = mysqli_real_escape_string($conexao,$status); $where .= " AND status = '$s'"; }
 if (!empty($origem)) { $o = mysqli_real_escape_string($conexao,$origem); $where .= " AND origem = '$o'"; }
 if (!empty($etiq))   { $e = mysqli_real_escape_string($conexao,$etiq);   $where .= " AND etiqueta = '$e'"; }
 
-$resultado      = mysqli_query($conexao, "SELECT * FROM leads $where ORDER BY criado_em DESC");
-$total_filtrado = mysqli_num_rows($resultado);
+// ── Filtro de responsável ──
+// Colaboradores veem APENAS leads atribuídos a eles
+// Admin pode filtrar por responsável se quiser
+$meu_colab_id = eh_admin() ? 0 : (int)($_SESSION['colab_id'] ?? 0);
+
+// Verifica se a coluna atribuido_para existe
+$col_atrib = mysqli_query($conexao, "SHOW COLUMNS FROM leads LIKE 'atribuido_para'");
+$tem_atribuicao = $col_atrib && mysqli_num_rows($col_atrib) > 0;
+
+if ($tem_atribuicao) {
+    if (!eh_admin() && $meu_colab_id > 0) {
+        // Colaborador: só vê leads atribuídos a ele
+        $where .= " AND atribuido_para = $meu_colab_id";
+    } elseif (eh_admin() && !empty($_GET['responsavel'])) {
+        // Admin filtrando por responsável
+        $resp = (int)$_GET['responsavel'];
+        if ($resp > 0)  $where .= " AND atribuido_para = $resp";
+        if ($resp === -1) $where .= " AND (atribuido_para IS NULL OR atribuido_para = 0)";
+    }
+}
+
+// Lista de colaboradores ativos para o filtro do admin
+$lista_colabs = [];
+if (eh_admin() && $tem_atribuicao) {
+    $rc = mysqli_query($conexao, "SELECT id, nome_completo, colaborador_id FROM colaboradores WHERE status='ativo' ORDER BY nome_completo");
+    while ($c = mysqli_fetch_assoc($rc)) $lista_colabs[] = $c;
+}
+
+// ── Paginação ──
+$por_pagina     = 25;
+$pagina_atual_n = max(1, (int)($_GET['pagina'] ?? 1));
+// Conta total filtrado sem LIMIT
+$count_r        = mysqli_query($conexao, "SELECT COUNT(*) as t FROM leads $where");
+$total_filtrado = (int)(mysqli_fetch_assoc($count_r)['t'] ?? 0);
+$total_paginas  = max(1, (int)ceil($total_filtrado / $por_pagina));
+$pagina_atual_n = min($pagina_atual_n, $total_paginas); // não deixa passar do máximo
+$offset         = ($pagina_atual_n - 1) * $por_pagina;
+
+$resultado   = mysqli_query($conexao,
+    "SELECT l.*" . ($tem_atribuicao ? ", c.nome_completo as resp_nome, c.colaborador_id as resp_cid" : "") . "
+     FROM leads l" . ($tem_atribuicao ? " LEFT JOIN colaboradores c ON c.id = l.atribuido_para" : "") . "
+     $where ORDER BY $ordem $direcao LIMIT $por_pagina OFFSET $offset"
+);
 $total_geral_r  = mysqli_query($conexao, "SELECT COUNT(*) as t FROM leads");
-$total_geral    = mysqli_fetch_assoc($total_geral_r)['t'] ?? 0;
+$total_geral    = (int)(mysqli_fetch_assoc($total_geral_r)['t'] ?? 0);
 $tem_filtro     = !empty($busca) || !empty($status) || !empty($origem) || !empty($etiq);
+
+// Monta URL base preservando todos os parâmetros menos a página
+$params_paginacao = array_filter([
+    'view'     => $view_ativa,
+    'busca'    => $busca,
+    'status'   => $status,
+    'origem'   => $origem,
+    'etiqueta' => $etiq,
+    'ordem'    => $ordem !== 'criado_em' ? $ordem : '',
+    'dir'      => $direcao !== 'desc'    ? $direcao : '',
+]);
+$url_pag_base = 'leads.php?' . http_build_query(array_filter($params_paginacao));
 
 // ── Para o kanban: buscar todos os leads agrupados ──
 // (independente dos filtros — no kanban mostramos tudo)
 $colunas_kanban = [
-    'novo'       => ['titulo'=>'Novo',       'cor'=>'#008CFF', 'leads'=>[]],
-    'em_contato' => ['titulo'=>'Em contato', 'cor'=>'#F59E0B', 'leads'=>[]],
-    'fechado'    => ['titulo'=>'Fechado',     'cor'=>'#10B981', 'leads'=>[]],
-    'perdido'    => ['titulo'=>'Perdido',     'cor'=>'#EF4444', 'leads'=>[]],
+    'novo'             => ['titulo'=>'Novo',             'cor'=>'#008CFF', 'leads'=>[]],
+    'em_contato'       => ['titulo'=>'Em contato',       'cor'=>'#F59E0B', 'leads'=>[]],
+    'proposta_enviada' => ['titulo'=>'Proposta enviada', 'cor'=>'#7C3AED', 'leads'=>[]],
+    'negociacao'       => ['titulo'=>'Negociação',       'cor'=>'#F97316', 'leads'=>[]],
+    'fechado'          => ['titulo'=>'Fechado',           'cor'=>'#10B981', 'leads'=>[]],
+    'perdido'          => ['titulo'=>'Perdido',           'cor'=>'#EF4444', 'leads'=>[]],
 ];
 $r_kanban = mysqli_query($conexao,
     "SELECT id, nome, telefone, email, origem, etiqueta, valor,
@@ -104,9 +180,39 @@ if (!empty($_SESSION['flash_msg'])) {
 }
 
 $etiquetas_disponiveis = ['VIP','Urgente','Retornar','Proposta enviada','Aguardando','Frio'];
+
+// ── Função para gerar link de cabeçalho ordenável ──
+function th_link($col, $label, $ordem_atual, $direcao_atual, $params_get) {
+    $ativo   = $ordem_atual === $col;
+    $dir_new = ($ativo && $direcao_atual === 'asc') ? 'desc' : 'asc';
+    $params  = array_merge($params_get, ['ordem' => $col, 'dir' => $dir_new]);
+    $url     = 'leads.php?' . http_build_query($params);
+
+    // Seta ativa mostra direção atual, inativa mostra ícone neutro
+    if ($ativo) {
+        $seta = $direcao_atual === 'asc'
+            ? '<span class="th-seta">↑</span>'
+            : '<span class="th-seta">↓</span>';
+    } else {
+        $seta = '<span class="th-seta" style="opacity:0.25;">↕</span>';
+    }
+
+    $cls = $ativo ? 'th-link th-ativo' : 'th-link';
+    return "<a href=\"$url\" class=\"$cls\">$label $seta</a>";
+}
+
+// Parâmetros GET atuais para manter nos links
+$get_atual = array_filter([
+    'busca'    => $busca,
+    'status'   => $status,
+    'origem'   => $origem,
+    'etiqueta' => $etiq,
+    'view'     => $view_ativa, // sempre preserva a view ativa
+]);
 ?>
 <!DOCTYPE html>
-<html lang="pt-BR">
+<?php $__dark = isset($_COOKIE['norion_tema']) && $_COOKIE['norion_tema'] === 'dark'; ?>
+<html lang="pt-BR" class="<?php echo $__dark ? 'dark' : ''; ?>">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Norion CRM — Leads</title>
@@ -152,6 +258,69 @@ $etiquetas_disponiveis = ['VIP','Urgente','Retornar','Proposta enviada','Aguarda
         .filtros-contagem { margin-left:auto; font-size:12px; color:var(--text-3); white-space:nowrap; }
         .filtros-contagem strong { color:var(--text-1); }
 
+        /* ── Paginação ── */
+        .paginacao {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+            background: var(--surface-2);
+            border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+        }
+        .pag-info { font-size: 12px; color: var(--text-3); }
+        .pag-info strong { color: var(--text-1); }
+        .pag-botoes { display: flex; align-items: center; gap: 4px; }
+        .pag-btn {
+            min-width: 32px; height: 32px;
+            display: inline-flex; align-items: center; justify-content: center;
+            border-radius: var(--radius); font-size: 12px; font-weight: 600;
+            text-decoration: none; transition: all 0.15s;
+            border: 1px solid var(--border-2);
+            background: var(--surface); color: var(--text-2);
+            padding: 0 8px;
+        }
+        .pag-btn:hover { background: var(--surface-2); color: var(--text-1); border-color: var(--border-2); }
+        .pag-btn.ativo { background: var(--azul); color: white; border-color: var(--azul); }
+        .pag-btn.desabilitado { opacity: 0.35; pointer-events: none; }
+        .pag-reticencias { font-size: 12px; color: var(--text-3); padding: 0 4px; }
+
+        /* ── Cabeçalhos ordenáveis ── */
+        th { cursor: default; }
+        th:has(.th-link) { padding: 0; }
+        .th-link {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 11px 16px;
+            color: var(--text-3);
+            text-decoration: none;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            white-space: nowrap;
+            cursor: pointer;
+            transition: color 0.15s, background 0.15s;
+            user-select: none;
+        }
+        .th-link:hover {
+            color: var(--text-1);
+            background: var(--border);
+        }
+        .th-link.th-ativo {
+            color: var(--azul);
+        }
+        .th-link.th-ativo:hover {
+            color: var(--azul-hover);
+            background: var(--azul-light);
+        }
+        .th-seta {
+            font-size: 12px;
+            font-weight: 800;
+            line-height: 1;
+        }
+
         /* ── Barra de ações em massa ── */
         .barra-massa { display:none; align-items:center; gap:10px; padding:10px 16px; background:#EFF8FF; border-bottom:1px solid var(--azul-mid); }
         .barra-massa.visivel { display:flex; }
@@ -171,31 +340,60 @@ $etiquetas_disponiveis = ['VIP','Urgente','Retornar','Proposta enviada','Aguarda
         .lead-nome-link:hover { color:var(--azul); }
 
         /* ── Kanban ── */
-        .kanban-section { padding: 20px; }
-        .kanban-wrap { display:flex; gap:14px; overflow-x:auto; padding-bottom:16px; align-items:flex-start; }
-        .kanban-coluna { flex-shrink:0; width:260px; display:flex; flex-direction:column; gap:8px; }
-        .coluna-header { display:flex; align-items:center; gap:8px; padding:10px 12px; background:var(--surface); border-radius:var(--radius-lg); border:1px solid var(--border); }
-        .coluna-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
-        .coluna-titulo { font-size:13px; font-weight:700; color:var(--text-1); flex:1; }
-        .coluna-count { font-size:11px; font-weight:600; color:var(--text-3); background:var(--surface-2); border:1px solid var(--border); border-radius:20px; padding:1px 7px; min-width:22px; text-align:center; }
-        .coluna-corpo { min-height:120px; display:flex; flex-direction:column; gap:8px; padding:4px 0; border-radius:var(--radius-lg); transition:background 0.15s; }
+        .kanban-section { padding: 16px 20px; }
+
+        .kanban-wrap {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+
+        /* Sem nth-child especial — 3 colunas por linha automaticamente */
+        .kanban-coluna { display:flex; flex-direction:column; gap:8px; }
+        .coluna-header { display:flex; align-items:center; gap:6px; padding:8px 10px; background:var(--surface); border-radius:var(--radius-lg); border:1px solid var(--border); }
+        .coluna-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+        .coluna-titulo { font-size:12px; font-weight:700; color:var(--text-1); flex:1; }
+        .coluna-count { font-size:10px; font-weight:600; color:var(--text-3); background:var(--surface-2); border:1px solid var(--border); border-radius:20px; padding:1px 6px; min-width:20px; text-align:center; flex-shrink:0; }
+        .coluna-corpo { min-height:100px; display:flex; flex-direction:column; gap:6px; padding:4px 0; border-radius:var(--radius-lg); transition:background 0.15s; }
         .coluna-corpo.drag-over { background:var(--azul-light); outline:2px dashed var(--azul-mid); outline-offset:2px; }
-        .kanban-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:12px 14px; cursor:grab; transition:box-shadow 0.15s,opacity 0.15s; user-select:none; }
-        .kanban-card:hover { border-color:var(--border-2); box-shadow:0 2px 8px rgba(0,0,0,0.08); }
+
+        /* Coluna inteira fica visualmente receptiva durante o drag */
+        .kanban-coluna.drop-alvo { opacity: 0.85; }
+        .kanban-coluna.drop-alvo-ativo .coluna-header {
+            background: var(--azul-light);
+            border-color: var(--azul-mid);
+        }
+        .kanban-coluna.drop-alvo-ativo .coluna-corpo {
+            background: var(--azul-light);
+            outline: 2px dashed var(--azul-mid);
+            outline-offset: 2px;
+            min-height: 80px;
+        }
+
+        .kanban-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:10px 12px; cursor:grab; transition:box-shadow 0.15s,opacity 0.15s; user-select:none; }
+        .kanban-card:hover { border-color:var(--border-2); box-shadow:0 2px 6px rgba(0,0,0,0.06); }
         .kanban-card.dragging { opacity:0.4; }
-        .kanban-card-linha { height:3px; border-radius:2px; margin-bottom:10px; }
-        .card-nome-k { font-size:13px; font-weight:700; color:var(--text-1); margin-bottom:4px; }
-        .proposta-tag { display:inline-flex; align-items:center; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:700; margin-bottom:8px; background:var(--surface-2); border:1px solid var(--border); color:var(--text-2); }
+        .kanban-card-linha { height:2px; border-radius:2px; margin-bottom:8px; }
+        .card-nome-k { font-size:12px; font-weight:700; color:var(--text-1); margin-bottom:4px; line-height:1.3; }
+        .proposta-tag { display:inline-flex; align-items:center; padding:2px 6px; border-radius:5px; font-size:10px; font-weight:700; margin-bottom:6px; background:var(--surface-2); border:1px solid var(--border); color:var(--text-2); }
         .prop-Site{background:#EFF8FF;border-color:#B8DCFF;color:#0055B3}
         .prop-Software-sob-medida{background:#EDE9FE;border-color:#C4B5FD;color:#4C1D95}
         .prop-Fluxo-de-IA{background:#D1FAE5;border-color:#6EE7B7;color:#065F46}
         .prop-Agente-de-IA{background:#FEF3C7;border-color:#FCD34D;color:#92400E}
         .prop-Landing-Page{background:#FEE2E2;border-color:#FCA5A5;color:#991B1B}
-        .card-info-k { display:flex; flex-direction:column; gap:3px; margin-bottom:8px; }
-        .card-info-linha { display:flex; align-items:center; gap:5px; font-size:11px; color:var(--text-3); }
-        .card-info-linha svg { width:11px; height:11px; stroke:var(--text-3); flex-shrink:0; }
-        .card-footer-k { display:flex; align-items:center; justify-content:space-between; margin-top:8px; padding-top:8px; border-top:1px solid var(--border); }
-        .coluna-vazia { text-align:center; padding:20px 10px; font-size:12px; color:var(--text-3); border:1px dashed var(--border); border-radius:var(--radius-lg); }
+        .card-info-k { display:flex; flex-direction:column; gap:2px; margin-bottom:6px; }
+        .card-info-linha { display:flex; align-items:center; gap:4px; font-size:10px; color:var(--text-3); }
+        .card-info-linha svg { width:10px; height:10px; stroke:var(--text-3); flex-shrink:0; }
+        .card-footer-k { display:flex; align-items:center; justify-content:space-between; margin-top:6px; padding-top:6px; border-top:1px solid var(--border); }
+        .coluna-vazia { text-align:center; padding:16px 8px; font-size:11px; color:var(--text-3); border:1px dashed var(--border); border-radius:var(--radius); }
+
+        /* Responsivo */
+        @media (max-width: 900px) {
+            .kanban-wrap { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 560px) {
+            .kanban-wrap { grid-template-columns: 1fr; }
+        }
 
         /* ── Drawer lateral ── */
         .drawer-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.35); z-index:150; opacity:0; pointer-events:none; transition:opacity 0.25s ease; }
@@ -297,6 +495,13 @@ $etiquetas_disponiveis = ['VIP','Urgente','Retornar','Proposta enviada','Aguarda
             <button class="btn btn-secondary btn-sm" id="btn-selecionar" onclick="toggleSelecao()">Selecionar</button>
             <?php endif; ?>
             <?php if ($pode_editar_leads): ?>
+            <a href="leads_importar.php" class="btn btn-ghost btn-sm" style="display:inline-flex;align-items:center;gap:5px;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                Importar CSV
+            </a>
             <a href="leads_novo.php" class="btn btn-primary btn-sm">+ Novo lead</a>
             <?php endif; ?>
         </div>
@@ -331,6 +536,13 @@ $etiquetas_disponiveis = ['VIP','Urgente','Retornar','Proposta enviada','Aguarda
             <!-- Filtros -->
             <form action="leads.php" method="get" id="form-filtros">
                 <input type="hidden" name="view" value="tabela">
+                <?php if ($ordem !== 'criado_em'): ?>
+                <input type="hidden" name="ordem" value="<?php echo htmlspecialchars($ordem); ?>">
+                <?php endif; ?>
+                <?php if ($direcao !== 'desc'): ?>
+                <input type="hidden" name="dir" value="<?php echo htmlspecialchars($direcao); ?>">
+                <?php endif; ?>
+                <!-- pagina não é incluído — ao filtrar sempre volta à pág 1 -->
                 <div class="filtros-wrap">
                     <div class="input-icone-wrap">
                         <svg viewBox="0 0 24 24" fill="none" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -339,7 +551,7 @@ $etiquetas_disponiveis = ['VIP','Urgente','Retornar','Proposta enviada','Aguarda
                     </div>
                     <select class="filtro-select <?php echo !empty($status)?'ativo':''; ?>" name="status" onchange="this.form.submit()">
                         <option value="">Todos os status</option>
-                        <?php foreach(['novo'=>'Novo','em_contato'=>'Em contato','fechado'=>'Fechado','perdido'=>'Perdido'] as $v=>$r): $s=($status===$v)?'selected':''; ?>
+                        <?php foreach(['novo'=>'Novo','em_contato'=>'Em contato','proposta_enviada'=>'Proposta enviada','negociacao'=>'Negociação','fechado'=>'Fechado','perdido'=>'Perdido'] as $v=>$r): $s=($status===$v)?'selected':''; ?>
                             <option value="<?php echo $v; ?>" <?php echo $s; ?>><?php echo $r; ?></option>
                         <?php endforeach; ?>
                     </select>
@@ -355,6 +567,16 @@ $etiquetas_disponiveis = ['VIP','Urgente','Retornar','Proposta enviada','Aguarda
                             <option value="<?php echo $et; ?>" <?php echo $s; ?>><?php echo $et; ?></option>
                         <?php endforeach; ?>
                     </select>
+                    <?php if (eh_admin() && $tem_atribuicao && !empty($lista_colabs)): ?>
+                    <select class="filtro-select <?php echo isset($_GET['responsavel'])&&$_GET['responsavel']!==''?'ativo':''; ?>"
+                            name="responsavel" onchange="this.form.submit()">
+                        <option value="">Todos os responsáveis</option>
+                        <option value="-1" <?php echo (($_GET['responsavel']??'')=='-1')?'selected':''; ?>>Sem responsável</option>
+                        <?php foreach($lista_colabs as $lc): $sel=(($_GET['responsavel']??'')==$lc['id'])?'selected':''; ?>
+                        <option value="<?php echo $lc['id']; ?>" <?php echo $sel; ?>><?php echo htmlspecialchars($lc['nome_completo']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <?php endif; ?>
                     <button type="submit" class="btn btn-secondary btn-sm">Buscar</button>
                     <?php if ($tem_filtro): ?>
                         <a href="leads.php?view=tabela" class="btn btn-secondary btn-sm" style="color:var(--vermelho);border-color:#FECACA;">× Limpar</a>
@@ -362,8 +584,14 @@ $etiquetas_disponiveis = ['VIP','Urgente','Retornar','Proposta enviada','Aguarda
                     <div class="filtros-contagem">
                         <?php if ($tem_filtro): ?>
                             <strong><?php echo $total_filtrado; ?></strong> de <?php echo $total_geral; ?> leads
+                            <?php if ($total_paginas > 1): ?>
+                             · pág. <?php echo $pagina_atual_n; ?>/<?php echo $total_paginas; ?>
+                            <?php endif; ?>
                         <?php else: ?>
                             <strong><?php echo $total_geral; ?></strong> leads no total
+                            <?php if ($total_paginas > 1): ?>
+                             · pág. <?php echo $pagina_atual_n; ?>/<?php echo $total_paginas; ?>
+                            <?php endif; ?>
                         <?php endif; ?>
                     </div>
                 </div>
@@ -373,68 +601,145 @@ $etiquetas_disponiveis = ['VIP','Urgente','Retornar','Proposta enviada','Aguarda
             <table id="tabela-leads">
                 <thead>
                     <tr>
-                        <th class="col-sel" style="display:none;width:40px;">
+                        <th class="col-sel" style="display:none;width:36px;">
                             <input type="checkbox" class="cb-lead" id="cb-todos" onchange="selecionarTodos(this.checked)">
                         </th>
-                        <th>Nome</th><th>Telefone</th><th>Tipo</th><th>Valor</th><th>Etiqueta</th><th>Status</th><th>Data</th><th></th>
+                        <th><?php echo th_link('nome',      'Lead',   $ordem, $direcao, $get_atual); ?></th>
+                        <th>Tipo / Etiqueta</th>
+                        <th><?php echo th_link('valor',     'Valor',  $ordem, $direcao, $get_atual); ?></th>
+                        <th><?php echo th_link('status',    'Status', $ordem, $direcao, $get_atual); ?></th>
+                        <th style="width:80px;"></th>
                     </tr>
                 </thead>
                 <tbody>
                 <?php if ($total_filtrado === 0): ?>
-                    <tr><td colspan="9"><div class="empty-state">
+                    <tr><td colspan="6"><div class="empty-state">
                         <?php if ($tem_filtro): ?>
                             <strong>Nenhum lead encontrado</strong><a href="leads.php?view=tabela" style="color:var(--azul);">Limpar filtros</a>
                         <?php else: ?>
                             <strong>Nenhum lead cadastrado</strong>Clique em "+ Novo lead" para começar
                         <?php endif; ?>
                     </div></td></tr>
-                <?php else: while($l = mysqli_fetch_assoc($resultado)): ?>
-                    <tr data-id="<?php echo $l['id']; ?>">
+                <?php else: while($l = mysqli_fetch_assoc($resultado)):
+                    // Destaque: lead atribuído ao colaborador logado
+                    $e_meu = $tem_atribuicao && !eh_admin() && ($l['atribuido_para'] ?? 0) == $meu_colab_id;
+                ?>
+                    <tr data-id="<?php echo $l['id']; ?>" <?php echo $e_meu ? 'style="background:var(--azul-light);border-left:3px solid var(--azul);"' : ''; ?>>
                         <td class="col-sel" style="display:none;">
                             <input type="checkbox" class="cb-lead cb-linha" value="<?php echo $l['id']; ?>" onchange="atualizarSelecao()">
                         </td>
-                        <td><span class="lead-nome-link" onclick="abrirDrawer(<?php echo $l['id']; ?>)"><?php echo htmlspecialchars($l['nome']); ?></span></td>
-                        <td style="color:var(--text-2);"><?php echo htmlspecialchars($l['telefone']?:'—'); ?></td>
+
+                        <!-- Nome + telefone + responsável -->
                         <td>
-                            <?php if (!empty($l['tipo_proposta'])):
-                                $pc = 'prop-'.str_replace(' ','-',$l['tipo_proposta']); ?>
-                                <span class="proposta-tag <?php echo $pc; ?>" style="font-size:10px;padding:2px 7px;"><?php echo htmlspecialchars($l['tipo_proposta']); ?></span>
-                            <?php else: ?>—<?php endif; ?>
-                        </td>
-                        <td>
-                            <?php
-                            // Se fechado e tem valor real → mostra valor acordado em verde
-                            // Se não fechado e tem possível ganho → mostra estimado em cinza
-                            // Senão → traço
-                            if ($l['status'] === 'fechado' && $l['valor'] > 0):
-                            ?>
-                                <span style="color:var(--verde);font-weight:700;font-size:13px;">
-                                    R$ <?php echo number_format($l['valor'],2,',','.'); ?>
-                                </span>
-                            <?php elseif (($l['possivel_ganho'] ?? 0) > 0): ?>
-                                <span style="color:var(--text-3);font-size:12px;" title="Possível ganho estimado">
-                                    ~R$ <?php echo number_format($l['possivel_ganho'],2,',','.'); ?>
-                                </span>
-                            <?php else: ?>
-                                <span style="color:var(--text-3);">—</span>
+                            <div><span class="lead-nome-link" onclick="abrirDrawer(<?php echo $l['id']; ?>)"><?php echo htmlspecialchars($l['nome']); ?></span></div>
+                            <?php if ($l['telefone']): ?>
+                            <div style="font-size:11px;color:var(--text-3);margin-top:2px;"><?php echo htmlspecialchars($l['telefone']); ?></div>
+                            <?php endif; ?>
+                            <?php if ($tem_atribuicao && !empty($l['resp_nome'])): ?>
+                            <div style="font-size:10px;color:var(--azul);margin-top:3px;font-weight:600;">
+                                → <?php echo htmlspecialchars($l['resp_nome']); ?>
+                            </div>
                             <?php endif; ?>
                         </td>
+
+                        <!-- Tipo + etiqueta juntos -->
                         <td>
+                            <?php if (!empty($l['tipo_proposta'])): $pc='prop-'.str_replace(' ','-',$l['tipo_proposta']); ?>
+                                <span class="proposta-tag <?php echo $pc; ?>" style="font-size:10px;padding:2px 6px;margin-bottom:3px;display:inline-flex;"><?php echo htmlspecialchars($l['tipo_proposta']); ?></span>
+                            <?php endif; ?>
                             <?php if (!empty($l['etiqueta'])): $ec='etq-'.str_replace(' ','-',$l['etiqueta']); ?>
-                                <span class="etiqueta-badge <?php echo $ec; ?>"><?php echo htmlspecialchars($l['etiqueta']); ?></span>
-                            <?php else: ?>—<?php endif; ?>
+                                <br><span class="etiqueta-badge <?php echo $ec; ?>" style="margin-top:2px;"><?php echo htmlspecialchars($l['etiqueta']); ?></span>
+                            <?php endif; ?>
+                            <?php if (empty($l['tipo_proposta']) && empty($l['etiqueta'])): ?>—<?php endif; ?>
                         </td>
+
+                        <!-- Valor -->
+                        <td>
+                            <?php if ($l['status']==='fechado' && $l['valor']>0): ?>
+                                <span style="color:var(--verde);font-weight:700;font-size:12px;">R$ <?php echo number_format($l['valor'],2,',','.'); ?></span>
+                            <?php elseif(($l['possivel_ganho']??0)>0): ?>
+                                <span style="color:var(--text-3);font-size:11px;" title="Possível ganho">~R$ <?php echo number_format($l['possivel_ganho'],2,',','.'); ?></span>
+                            <?php else: ?><span style="color:var(--text-3);">—</span><?php endif; ?>
+                        </td>
+
+                        <!-- Status -->
                         <td><?php
-                            $map=['novo'=>['badge-novo','Novo'],'em_contato'=>['badge-contato','Em contato'],'fechado'=>['badge-fechado','Fechado'],'perdido'=>['badge-perdido','Perdido']];
+                            $map=['novo'=>['badge-novo','Novo'],'em_contato'=>['badge-contato','Em contato'],'proposta_enviada'=>['badge-proposta','Proposta enviada'],'negociacao'=>['badge-negociacao','Negociação'],'fechado'=>['badge-fechado','Fechado'],'perdido'=>['badge-perdido','Perdido']];
                             [$cls,$lbl]=$map[$l['status']]??['badge-novo',$l['status']];
                             echo "<span class=\"badge $cls\">$lbl</span>";
                         ?></td>
-                        <td style="color:var(--text-3);"><?php echo date('d/m/Y',strtotime($l['criado_em'])); ?></td>
+
+                        <!-- Ação -->
                         <td><?php if($pode_editar_leads): ?><a href="leads_editar.php?id=<?php echo $l['id']; ?>" class="btn btn-secondary btn-sm">Editar</a><?php endif; ?></td>
                     </tr>
                 <?php endwhile; endif; ?>
                 </tbody>
             </table>
+
+            <!-- ── Paginação ── -->
+            <?php if ($total_paginas > 1): ?>
+            <div class="paginacao">
+                <!-- Info: mostrando X–Y de Z -->
+                <div class="pag-info">
+                    <?php
+                    $ini = $offset + 1;
+                    $fim = min($offset + $por_pagina, $total_filtrado);
+                    ?>
+                    Mostrando <strong><?php echo $ini; ?>–<?php echo $fim; ?></strong>
+                    de <strong><?php echo $total_filtrado; ?></strong> leads
+                </div>
+
+                <!-- Botões de página -->
+                <div class="pag-botoes">
+
+                    <!-- Anterior -->
+                    <a href="<?php echo $url_pag_base . '&pagina=' . ($pagina_atual_n - 1); ?>"
+                       class="pag-btn <?php echo $pagina_atual_n <= 1 ? 'desabilitado' : ''; ?>">
+                        ← Anterior
+                    </a>
+
+                    <?php
+                    // Gera os números de página com reticências inteligentes
+                    // Mostra: 1 … 4 5 [6] 7 8 … 20
+                    $janela = 2; // páginas ao redor da atual
+                    $paginas_mostrar = [];
+
+                    for ($p = 1; $p <= $total_paginas; $p++) {
+                        if (
+                            $p === 1 ||
+                            $p === $total_paginas ||
+                            ($p >= $pagina_atual_n - $janela && $p <= $pagina_atual_n + $janela)
+                        ) {
+                            $paginas_mostrar[] = $p;
+                        }
+                    }
+
+                    $ultimo_exibido = null;
+                    foreach ($paginas_mostrar as $p):
+                        // Adiciona reticências quando há salto
+                        if ($ultimo_exibido !== null && $p > $ultimo_exibido + 1):
+                    ?>
+                        <span class="pag-reticencias">…</span>
+                    <?php endif; ?>
+                        <a href="<?php echo $url_pag_base . '&pagina=' . $p; ?>"
+                           class="pag-btn <?php echo $p === $pagina_atual_n ? 'ativo' : ''; ?>">
+                            <?php echo $p; ?>
+                        </a>
+                    <?php
+                        $ultimo_exibido = $p;
+                    endforeach;
+                    ?>
+
+                    <!-- Próxima -->
+                    <a href="<?php echo $url_pag_base . '&pagina=' . ($pagina_atual_n + 1); ?>"
+                       class="pag-btn <?php echo $pagina_atual_n >= $total_paginas ? 'desabilitado' : ''; ?>">
+                        Próxima →
+                    </a>
+
+                </div>
+            </div>
+            <?php endif; ?>
+
         </div>
     </div>
 
@@ -603,6 +908,8 @@ var drawerAberto = false;
 var statusMap = {
     'novo':'<span class="badge badge-novo">Novo</span>',
     'em_contato':'<span class="badge badge-contato">Em contato</span>',
+    'proposta_enviada':'<span class="badge badge-proposta">Proposta enviada</span>',
+    'negociacao':'<span class="badge badge-negociacao">Negociação</span>',
     'fechado':'<span class="badge badge-fechado">Fechado</span>',
     'perdido':'<span class="badge badge-perdido">Perdido</span>',
 };
@@ -624,13 +931,15 @@ function abrirDrawer(leadId) {
 }
 
 function montarDrawer(data) {
-    var lead=data.lead, hist=data.historico, docs=data.documentos;
+    var lead=data.lead, hist=data.historico, docs=data.documentos, log=data.log||[];
     document.getElementById('drawer-nome').textContent = lead.nome;
     var badges = (statusMap[lead.status]||'');
     if (lead.etiqueta) badges += ' <span class="etiqueta-badge etq-'+lead.etiqueta.replace(/ /g,'-')+'">'+lead.etiqueta+'</span>';
     if (lead.tipo_proposta) badges += ' <span class="proposta-tag prop-'+lead.tipo_proposta.replace(/ /g,'-')+'" style="font-size:10px;">'+lead.tipo_proposta+'</span>';
     document.getElementById('drawer-badges').innerHTML = badges;
     var html = '';
+
+    // ── Informações ──
     html += '<div class="drawer-secao"><div class="drawer-secao-titulo">Informações</div><div class="dados-grid">';
     html += dadoItem('Telefone', lead.telefone||'—');
     html += dadoItem('Email', lead.email||'—');
@@ -639,9 +948,13 @@ function montarDrawer(data) {
     if (lead.possivel_ganho > 0) html += dadoItem('Possível ganho', 'R$ '+formatarMoeda(lead.possivel_ganho));
     if (lead.status==='fechado'&&lead.valor>0) html += dadoItem('Valor fechado', 'R$ '+formatarMoeda(lead.valor));
     html += '</div></div>';
+
+    // ── Observações ──
     if (lead.observacoes&&lead.observacoes.trim()) {
         html += '<div class="drawer-secao"><div class="drawer-secao-titulo">Observações</div><div class="obs-texto">'+escHtml(lead.observacoes)+'</div></div>';
     }
+
+    // ── Histórico ──
     html += '<div class="drawer-secao"><div class="drawer-secao-titulo">Histórico ('+hist.length+')</div>';
     if (hist.length===0) { html += '<div style="font-size:12px;color:var(--text-3);">Nenhum contato registrado</div>'; }
     else {
@@ -655,6 +968,8 @@ function montarDrawer(data) {
         html += '</div>';
     }
     html += '</div>';
+
+    // ── Documentos ──
     html += '<div class="drawer-secao"><div class="drawer-secao-titulo">Documentos ('+docs.length+')</div>';
     if (docs.length===0) { html += '<div style="font-size:12px;color:var(--text-3);">Nenhum documento</div>'; }
     else {
@@ -678,6 +993,48 @@ function montarDrawer(data) {
         });
     }
     html += '</div>';
+
+    // ── Log de atividades ──
+    html += '<div class="drawer-secao">';
+    html += '<div class="drawer-secao-titulo">Atividades ('+log.length+')</div>';
+    if (log.length === 0) {
+        html += '<div style="font-size:12px;color:var(--text-3);">Nenhuma atividade registrada</div>';
+    } else {
+        html += '<div style="display:flex;flex-direction:column;gap:0;">';
+        log.forEach(function(entry, i) {
+            var linha = '<div style="display:flex;align-items:flex-start;gap:10px;padding:9px 0;'
+                + (i < log.length-1 ? 'border-bottom:1px solid var(--border);' : '') + '">';
+
+            // Bolinha colorida
+            linha += '<div style="width:28px;height:28px;border-radius:50%;background:'+entry.bg
+                   + ';display:flex;align-items:center;justify-content:center;flex-shrink:0;">'
+                   + '<svg viewBox="0 0 24 24" fill="none" stroke="'+entry.fg+'" stroke-width="2" width="12" height="12">'
+                   + iconeLogJS(entry.acao) + '</svg></div>';
+
+            // Texto
+            linha += '<div style="flex:1;min-width:0;">';
+            linha += '<div style="font-size:12px;color:var(--text-1);line-height:1.4;">'
+                   + '<strong style="font-weight:700;">'+escHtml(entry.usuario)+'</strong> '
+                   + escHtml(entry.texto) + '</div>';
+            if (entry.detalhe) {
+                linha += '<div style="font-size:11px;color:var(--text-3);background:var(--surface-2);'
+                       + 'border:1px solid var(--border);border-radius:5px;padding:2px 7px;'
+                       + 'display:inline-block;margin-top:3px;">'
+                       + escHtml(entry.detalhe) + '</div>';
+            }
+            linha += '</div>';
+
+            // Data
+            linha += '<div style="font-size:10px;color:var(--text-3);white-space:nowrap;padding-top:2px;">'
+                   + escHtml(entry.quando) + '</div>';
+
+            linha += '</div>';
+            html += linha;
+        });
+        html += '</div>';
+    }
+    html += '</div>';
+
     document.getElementById('drawer-corpo').innerHTML = html;
     document.getElementById('btn-ir-editar').href = 'leads_editar.php?id='+lead.id;
     document.getElementById('drawer-rodape').style.display = 'block';
@@ -688,57 +1045,168 @@ function togglePrevia(id,btn) { var a=document.getElementById(id); if(!a)return;
 document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&drawerAberto) fecharDrawer(); });
 
 function dadoItem(l,v){return '<div><div class="dado-label">'+l+'</div><div class="dado-valor">'+escHtml(String(v))+'</div></div>';}
-function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/\n/g,'<br>');}
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/\n/g,'<br>');}
 function formatarData(s){if(!s)return'—';var p=s.split(' ')[0].split('-');return p[2]+'/'+p[1]+'/'+p[0];}
 function formatarDataHora(s){if(!s)return'—';var p=s.split(' '),d=p[0].split('-'),h=p[1]?p[1].substring(0,5):'';return d[2]+'/'+d[1]+'/'+d[0]+(h?' às '+h:'');}
 function formatarMoeda(v){return parseFloat(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});}
+
+// Ícones SVG por tipo de ação do log
+function iconeLogJS(acao) {
+    var icons = {
+        'criou':            '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+        'editou':           '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',
+        'status_alterado':  '<polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/>',
+        'valor_alterado':   '<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 1 0 0 7h5a3.5 3.5 0 1 1 0 7H6"/>',
+        'fechou':           '<polyline points="20 6 9 17 4 12"/>',
+        'arquivo_enviado':  '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
+        'arquivo_removido': '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+        'lembrete_criado':  '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
+    };
+    return icons[acao] || icons['editou'];
+}
 
 // ============================================================
 // KANBAN — drag and drop
 // ============================================================
 var podeEditarLeads = <?php echo $pode_editar_leads ? 'true' : 'false'; ?>;
-var cardArrastando=null, dadosFechamento=null;
+var cardArrastando = null, dadosFechamento = null;
+var autoScrollTimer = null; // timer do auto-scroll
 
+// ── Auto-scroll durante o drag ──
+// Detecta quando o mouse está perto das bordas e rola a página
+var SCROLL_ZONA = 120;  // pixels da borda que ativam o scroll
+var SCROLL_SPEED = 14;  // pixels por frame
+
+function iniciarAutoScroll(e) {
+    pararAutoScroll();
+    var y = e.clientY;
+    var alturaJanela = window.innerHeight;
+
+    if (y < SCROLL_ZONA) {
+        // Próximo do topo — sobe
+        var intensidade = Math.max(4, SCROLL_SPEED * (1 - y / SCROLL_ZONA));
+        autoScrollTimer = setInterval(function() {
+            window.scrollBy(0, -intensidade);
+        }, 16); // ~60fps
+    } else if (y > alturaJanela - SCROLL_ZONA) {
+        // Próximo do rodapé — desce
+        var intensidade = Math.max(4, SCROLL_SPEED * (1 - (alturaJanela - y) / SCROLL_ZONA));
+        autoScrollTimer = setInterval(function() {
+            window.scrollBy(0, intensidade);
+        }, 16);
+    }
+}
+
+function pararAutoScroll() {
+    if (autoScrollTimer) {
+        clearInterval(autoScrollTimer);
+        autoScrollTimer = null;
+    }
+}
+
+// Registra o movimento do mouse durante qualquer drag na página
+document.addEventListener('dragover', function(e) {
+    if (cardArrastando) iniciarAutoScroll(e);
+});
+document.addEventListener('dragend', pararAutoScroll);
+document.addEventListener('drop', pararAutoScroll);
+
+// ── Cards: inicializar drag ──
 function inicializarCards() {
     document.querySelectorAll('.kanban-card').forEach(function(card) {
-        card.addEventListener('dragstart',function(e){
-            // Bloqueia o drag se não tem permissão de editar
+        card.addEventListener('dragstart', function(e) {
             if (!podeEditarLeads) { e.preventDefault(); return false; }
-            cardArrastando=card; card.classList.add('dragging');
-            e.dataTransfer.setData('text/plain',card.dataset.id);
-            e.dataTransfer.effectAllowed='move';
+            cardArrastando = card;
+            card.classList.add('dragging');
+            e.dataTransfer.setData('text/plain', card.dataset.id);
+            e.dataTransfer.effectAllowed = 'move';
             e.stopPropagation();
+            // Destaca todas as colunas como alvos potenciais
+            document.querySelectorAll('.kanban-coluna').forEach(function(col) {
+                col.classList.add('drop-alvo');
+            });
         });
-        card.addEventListener('dragend',function(){
+        card.addEventListener('dragend', function() {
             card.classList.remove('dragging');
-            document.querySelectorAll('.coluna-corpo').forEach(function(c){c.classList.remove('drag-over');});
-            cardArrastando=null;
+            document.querySelectorAll('.coluna-corpo').forEach(function(c) {
+                c.classList.remove('drag-over');
+            });
+            document.querySelectorAll('.kanban-coluna').forEach(function(col) {
+                col.classList.remove('drop-alvo', 'drop-alvo-ativo');
+            });
+            cardArrastando = null;
+            pararAutoScroll();
         });
         card.addEventListener('click', function(e) {
-            if (card.classList.contains('dragging')) { e.stopPropagation(); e.preventDefault(); }
+            if (card.classList.contains('dragging')) {
+                e.stopPropagation(); e.preventDefault();
+            }
         });
     });
 }
 
-document.querySelectorAll('.coluna-corpo').forEach(function(coluna){
-    coluna.addEventListener('dragover',function(e){
-        if (!podeEditarLeads) return; // bloqueia drop se sem permissão
-        e.preventDefault();coluna.classList.add('drag-over');e.dataTransfer.dropEffect='move';
+// ── Colunas: aceitar drop ──
+// Registra tanto no coluna-corpo quanto no coluna-header
+// para que a área de drop seja a coluna inteira
+function registrarDropZone(elemento, colunaCorpo) {
+    elemento.addEventListener('dragover', function(e) {
+        if (!podeEditarLeads || !cardArrastando) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        // Destaca o corpo da coluna
+        document.querySelectorAll('.coluna-corpo').forEach(function(c) {
+            c.classList.remove('drag-over');
+        });
+        colunaCorpo.classList.add('drag-over');
+        // Destaca a coluna inteira
+        var kanbanColuna = colunaCorpo.closest('.kanban-coluna');
+        document.querySelectorAll('.kanban-coluna').forEach(function(c) {
+            c.classList.remove('drop-alvo-ativo');
+        });
+        if (kanbanColuna) kanbanColuna.classList.add('drop-alvo-ativo');
     });
-    coluna.addEventListener('dragleave',function(e){if(!coluna.contains(e.relatedTarget))coluna.classList.remove('drag-over');});
-    coluna.addEventListener('drop',function(e){
-        e.preventDefault(); coluna.classList.remove('drag-over');
-        if(!cardArrastando||!podeEditarLeads) return;
-        var novoStatus=coluna.dataset.status;
-        var colunaAtual=cardArrastando.closest('.coluna-corpo');
-        var statusAtual=colunaAtual?colunaAtual.dataset.status:null;
-        if(statusAtual===novoStatus) return;
-        if(novoStatus==='fechado'){
-            var possivel=parseFloat(cardArrastando.dataset.possivel)||0;
-            dadosFechamento={card:cardArrastando,colunaDestino:coluna,colunaOrigem:colunaAtual,leadId:cardArrastando.dataset.id,leadNome:cardArrastando.dataset.nome,possivel:possivel};
+
+    elemento.addEventListener('dragleave', function(e) {
+        // Só remove se o mouse saiu para fora da coluna inteira
+        var kanbanColuna = colunaCorpo.closest('.kanban-coluna');
+        if (kanbanColuna && kanbanColuna.contains(e.relatedTarget)) return;
+        colunaCorpo.classList.remove('drag-over');
+        if (kanbanColuna) kanbanColuna.classList.remove('drop-alvo-ativo');
+    });
+
+    elemento.addEventListener('drop', function(e) {
+        e.preventDefault();
+        colunaCorpo.classList.remove('drag-over');
+        var kanbanColuna = colunaCorpo.closest('.kanban-coluna');
+        if (kanbanColuna) kanbanColuna.classList.remove('drop-alvo-ativo');
+        if (!cardArrastando || !podeEditarLeads) return;
+        var novoStatus = colunaCorpo.dataset.status;
+        var colunaAtual = cardArrastando.closest('.coluna-corpo');
+        var statusAtual = colunaAtual ? colunaAtual.dataset.status : null;
+        if (statusAtual === novoStatus) return;
+        if (novoStatus === 'fechado') {
+            var possivel = parseFloat(cardArrastando.dataset.possivel) || 0;
+            dadosFechamento = {
+                card: cardArrastando, colunaDestino: colunaCorpo,
+                colunaOrigem: colunaAtual, leadId: cardArrastando.dataset.id,
+                leadNome: cardArrastando.dataset.nome, possivel: possivel
+            };
             abrirModalFechado(dadosFechamento);
-        } else { moverCard(cardArrastando,coluna,colunaAtual,novoStatus,0); }
+        } else {
+            moverCard(cardArrastando, colunaCorpo, colunaAtual, novoStatus, 0);
+        }
+        pararAutoScroll();
     });
+}
+
+// Registra drop no corpo E no header de cada coluna
+document.querySelectorAll('.kanban-coluna').forEach(function(kanbanColuna) {
+    var corpo  = kanbanColuna.querySelector('.coluna-corpo');
+    var header = kanbanColuna.querySelector('.coluna-header');
+    if (corpo)  registrarDropZone(corpo, corpo);
+    if (header) registrarDropZone(header, corpo);
+    // Também registra na coluna inteira para pegar espaços vazios
+    registrarDropZone(kanbanColuna, corpo);
 });
 
 function abrirModalFechado(d){

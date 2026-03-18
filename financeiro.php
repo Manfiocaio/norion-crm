@@ -65,12 +65,39 @@ if (isset($_GET['excluir_despesa']) && is_numeric($_GET['excluir_despesa'])) {
 // BUSCANDO OS DADOS FINANCEIROS
 // ============================================================
 $r=mysqli_query($conexao,"SELECT SUM(valor) as t FROM vendas WHERE MONTH(data_venda)=MONTH(CURDATE()) AND YEAR(data_venda)=YEAR(CURDATE())");
-$faturamento_mes = mysqli_fetch_assoc($r)['t'] ?? 0;
+$faturamento_mes = (float)(mysqli_fetch_assoc($r)['t'] ?? 0);
 
 $r2=mysqli_query($conexao,"SELECT SUM(valor) as t FROM despesas WHERE MONTH(data)=MONTH(CURDATE()) AND YEAR(data)=YEAR(CURDATE())");
-$despesas_mes = mysqli_fetch_assoc($r2)['t'] ?? 0;
+$despesas_mes = (float)(mysqli_fetch_assoc($r2)['t'] ?? 0);
 
 $resultado_mes = $faturamento_mes - $despesas_mes;
+
+// ── Mês passado para comparação ──
+$r_mp1 = mysqli_query($conexao,"SELECT SUM(valor) as t FROM vendas WHERE MONTH(data_venda)=MONTH(CURDATE()-INTERVAL 1 MONTH) AND YEAR(data_venda)=YEAR(CURDATE()-INTERVAL 1 MONTH)");
+$fat_mes_passado = (float)(mysqli_fetch_assoc($r_mp1)['t'] ?? 0);
+
+$r_mp2 = mysqli_query($conexao,"SELECT SUM(valor) as t FROM despesas WHERE MONTH(data)=MONTH(CURDATE()-INTERVAL 1 MONTH) AND YEAR(data)=YEAR(CURDATE()-INTERVAL 1 MONTH)");
+$desp_mes_passado = (float)(mysqli_fetch_assoc($r_mp2)['t'] ?? 0);
+
+$result_mes_passado = $fat_mes_passado - $desp_mes_passado;
+
+// Calcula variação percentual entre dois valores
+// Retorna array ['pct'=>18, 'sinal'=>'+', 'cor'=>'verde', 'seta'=>'↑']
+function calcular_variacao($atual, $anterior) {
+    if ($anterior == 0) {
+        if ($atual > 0) return ['pct'=>null, 'txt'=>'novo este mês', 'cor'=>'verde', 'seta'=>'↑'];
+        return null;
+    }
+    $pct  = round(($atual - $anterior) / $anterior * 100);
+    $sub  = abs($pct) . '% vs mês passado';
+    if ($pct > 0)  return ['pct'=>$pct,  'txt'=>$sub, 'cor'=>'verde',   'seta'=>'↑'];
+    if ($pct < 0)  return ['pct'=>$pct,  'txt'=>$sub, 'cor'=>'vermelho','seta'=>'↓'];
+    return            ['pct'=>0,    'txt'=>'igual ao mês passado', 'cor'=>'text-3',  'seta'=>'→'];
+}
+
+$var_fat    = calcular_variacao($faturamento_mes, $fat_mes_passado);
+$var_desp   = calcular_variacao($despesas_mes,   $desp_mes_passado);
+$var_result = calcular_variacao($resultado_mes,  $result_mes_passado);
 
 // ============================================================
 // DADOS DOS 3 GRÁFICOS — Lucro líquido (receitas − despesas)
@@ -117,14 +144,15 @@ while($row = mysqli_fetch_assoc($r_g1d)) {
 
 // Cruzando: para cada dia com receita, subtrai a despesa daquele dia
 // Se não houver despesa naquele dia, o ?? 0 garante que usamos zero
-$g1_labels=[]; $g1_valores=[];
+$g1_labels=[]; $g1_lucro=[]; $g1_receita=[]; $g1_despesa=[];
 foreach($rec_g1 as $chave => $dados) {
     $g1_labels[]  = $dados['label'];
-    $lucro = $dados['total'] - ($desp_g1[$chave] ?? 0);
-    // max(0, ...) garante que o valor não fique negativo no gráfico
-    // (barra negativa ficaria feia; o card de "Resultado" já mostra se deu negativo)
-    $g1_valores[] = max(0, $lucro);
+    $g1_receita[] = $dados['total'];
+    $desp         = $desp_g1[$chave] ?? 0;
+    $g1_despesa[] = $desp;
+    $g1_lucro[]   = max(0, $dados['total'] - $desp);
 }
+$g1_valores = $g1_lucro; // compatibilidade
 
 // ── Gráfico 2: Últimos 3 meses — agrupado por MÊS ──
 
@@ -156,11 +184,15 @@ while($row = mysqli_fetch_assoc($r_g2d)) {
     $desp_g2[$row['chave']] = (float)$row['total'];
 }
 
-$g2_labels=[]; $g2_valores=[];
+$g2_labels=[]; $g2_lucro=[]; $g2_receita=[]; $g2_despesa=[];
 foreach($rec_g2 as $chave => $dados) {
     $g2_labels[]  = $dados['label'];
-    $g2_valores[] = max(0, $dados['total'] - ($desp_g2[$chave] ?? 0));
+    $g2_receita[] = $dados['total'];
+    $desp         = $desp_g2[$chave] ?? 0;
+    $g2_despesa[] = $desp;
+    $g2_lucro[]   = max(0, $dados['total'] - $desp);
 }
+$g2_valores = $g2_lucro;
 
 // ── Gráfico 3: Últimos 6 meses — agrupado por MÊS ──
 
@@ -192,11 +224,15 @@ while($row = mysqli_fetch_assoc($r_g3d)) {
     $desp_g3[$row['chave']] = (float)$row['total'];
 }
 
-$g3_labels=[]; $g3_valores=[];
+$g3_labels=[]; $g3_lucro=[]; $g3_receita=[]; $g3_despesa=[];
 foreach($rec_g3 as $chave => $dados) {
     $g3_labels[]  = $dados['label'];
-    $g3_valores[] = max(0, $dados['total'] - ($desp_g3[$chave] ?? 0));
+    $g3_receita[] = $dados['total'];
+    $desp         = $desp_g3[$chave] ?? 0;
+    $g3_despesa[] = $desp;
+    $g3_lucro[]   = max(0, $dados['total'] - $desp);
 }
+$g3_valores = $g3_lucro;
 
 $vendas=mysqli_query($conexao,"SELECT v.id,v.valor,v.data_venda,l.nome as lead_nome,l.origem FROM vendas v JOIN leads l ON v.lead_id=l.id ORDER BY v.data_venda DESC");
 
@@ -222,7 +258,8 @@ $despesas=mysqli_query($conexao,
 // (o WHERE já filtra os expirados, mas DATEDIFF ajuda a mostrar o aviso)
 ?>
 <!DOCTYPE html>
-<html lang="pt-BR">
+<?php $__dark = isset($_COOKIE['norion_tema']) && $_COOKIE['norion_tema'] === 'dark'; ?>
+<html lang="pt-BR" class="<?php echo $__dark ? 'dark' : ''; ?>">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Norion CRM — Financeiro</title>
@@ -328,20 +365,49 @@ $despesas=mysqli_query($conexao,
             </div>
         <?php endif; ?>
 
-        <!-- Cards de resumo -->
+        <!-- Cards de resumo com comparação -->
         <div class="grid-3" style="margin-bottom:20px;">
+
+            <?php
+            // Helper que gera o HTML da linha de variação
+            function html_var($var, $inverso = false) {
+                if (!$var) return '';
+                // Para despesas, crescimento é ruim (inverso)
+                $cor  = $inverso
+                    ? ($var['cor'] === 'verde' ? 'var(--vermelho)' : 'var(--verde)')
+                    : ($var['cor'] === 'verde' ? 'var(--verde)'    : 'var(--vermelho)');
+                if ($var['cor'] === 'text-3') $cor = 'var(--text-3)';
+                return '<div style="display:flex;align-items:center;gap:4px;margin-top:6px;">'
+                     . '<span style="font-size:12px;font-weight:700;color:'.$cor.';">'.$var['seta'].' </span>'
+                     . '<span style="font-size:11px;font-weight:600;color:'.$cor.';">'
+                     . htmlspecialchars($var['txt']).'</span></div>';
+            }
+            ?>
+
             <div class="metric-card verde">
                 <div class="metric-label">Receitas do mês</div>
-                <div class="metric-value" style="font-size:20px;">R$ <?php echo number_format($faturamento_mes,2,',','.'); ?></div>
+                <div class="metric-value" style="font-size:20px;">
+                    R$ <?php echo number_format($faturamento_mes,2,',','.'); ?>
+                </div>
+                <?php echo html_var($var_fat); ?>
             </div>
+
             <div class="metric-card vermelho">
                 <div class="metric-label">Despesas do mês</div>
-                <div class="metric-value" style="font-size:20px;">R$ <?php echo number_format($despesas_mes,2,',','.'); ?></div>
+                <div class="metric-value" style="font-size:20px;">
+                    R$ <?php echo number_format($despesas_mes,2,',','.'); ?>
+                </div>
+                <?php echo html_var($var_desp, true); // inverso: despesa crescer é ruim ?>
             </div>
+
             <div class="metric-card <?php echo $resultado_mes>=0?'verde':'vermelho'; ?>">
                 <div class="metric-label">Resultado do mês</div>
-                <div class="metric-value" style="font-size:20px;"><?php echo $resultado_mes>=0?'+':''; ?>R$ <?php echo number_format($resultado_mes,2,',','.'); ?></div>
+                <div class="metric-value" style="font-size:20px;">
+                    <?php echo $resultado_mes>=0?'+':''; ?>R$ <?php echo number_format(abs($resultado_mes),2,',','.'); ?>
+                </div>
+                <?php echo html_var($var_result); ?>
             </div>
+
         </div>
 
         <!-- ============================================================
@@ -349,18 +415,34 @@ $despesas=mysqli_query($conexao,
              ============================================================ -->
         <div class="card" style="margin-bottom:20px;">
 
-            <!-- Cabeçalho clicável do gráfico -->
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-                <div style="display:flex;align-items:center;gap:10px;">
-                    <span style="font-size:13px;font-weight:700;" id="grafico-titulo">Lucro líquido — últimos 30 dias</span>
-                    <!-- Seta que indica que é clicável -->
-                    <svg id="seta-periodo" style="width:14px;height:14px;stroke:var(--text-3);cursor:pointer;transition:transform 0.2s;" viewBox="0 0 24 24" fill="none" stroke-width="2.5">
+            <!-- Cabeçalho: título + seletor de série + seletor de período -->
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:12px;flex-wrap:wrap;">
+
+                <!-- Título clicável -->
+                <div style="display:flex;align-items:center;gap:8px;cursor:pointer;" onclick="document.getElementById('seletor-periodo').style.display=document.getElementById('seletor-periodo').style.display==='flex'?'none':'flex';document.getElementById('seta-periodo').style.transform=document.getElementById('seletor-periodo').style.display==='flex'?'rotate(180deg)':'rotate(0deg)';">
+                    <span style="font-size:13px;font-weight:700;color:var(--text-1);" id="grafico-titulo">Últimos 30 dias</span>
+                    <svg id="seta-periodo" style="width:13px;height:13px;stroke:var(--text-3);transition:transform 0.2s;" viewBox="0 0 24 24" fill="none" stroke-width="2.5">
                         <polyline points="6 9 12 15 18 9"/>
                     </svg>
                 </div>
 
-                <!-- Seletor de período — começa escondido -->
-                <!-- display:none = invisível; o JS mostra ao clicar no título -->
+                <!-- Alternador de série -->
+                <div style="display:flex;align-items:center;gap:6px;">
+                    <?php
+                    $series = ['lucro'=>'Lucro','receita'=>'Receita','despesa'=>'Despesas'];
+                    $cores  = ['lucro'=>'#008CFF','receita'=>'#10B981','despesa'=>'#EF4444'];
+                    foreach ($series as $k => $label): ?>
+                    <button id="btn-serie-<?php echo $k; ?>"
+                        onclick="trocarSerie('<?php echo $k; ?>')"
+                        class="btn-serie <?php echo $k === 'lucro' ? 'ativo' : ''; ?>"
+                        style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11px;font-weight:600;border:1px solid var(--border-2);background:var(--surface);color:var(--text-2);cursor:pointer;transition:all 0.15s;">
+                        <span class="radio-dot" style="width:8px;height:8px;border-radius:50%;border:2px solid <?php echo $cores[$k]; ?>;background:<?php echo $k === 'lucro' ? $cores[$k] : 'transparent'; ?>;flex-shrink:0;transition:background 0.15s;"></span>
+                        <?php echo $label; ?>
+                    </button>
+                    <?php endforeach; ?>
+                </div>
+
+                <!-- Seletor de período -->
                 <div id="seletor-periodo" style="display:none;gap:6px;align-items:center;">
                     <button class="btn-periodo ativo" onclick="trocarGrafico(1)" id="btn-p1">30 dias</button>
                     <button class="btn-periodo"       onclick="trocarGrafico(2)" id="btn-p2">3 meses</button>
@@ -369,14 +451,13 @@ $despesas=mysqli_query($conexao,
             </div>
 
             <!-- Os três canvas — só um fica visível por vez -->
-            <!-- O canvas 1 começa visível (display:block), os outros escondidos -->
-            <div id="wrap-g1" style="position:relative;height:240px;display:block;">
+            <div id="wrap-g1" style="position:relative;height:260px;display:block;">
                 <canvas id="grafico1"></canvas>
             </div>
-            <div id="wrap-g2" style="position:relative;height:300px;display:none;">
+            <div id="wrap-g2" style="position:relative;height:260px;display:none;">
                 <canvas id="grafico2"></canvas>
             </div>
-            <div id="wrap-g3" style="position:relative;height:360px;display:none;">
+            <div id="wrap-g3" style="position:relative;height:260px;display:none;">
                 <canvas id="grafico3"></canvas>
             </div>
 
@@ -618,76 +699,202 @@ window.onload = function() {
     var g3_valores = <?php echo json_encode($g3_valores); ?>;
     if (!g3_labels.length)  { g3_labels=['Sem dados'];  g3_valores=[0]; }
 
-    // Função reutilizável — evita repetir o mesmo código 3 vezes
-    // ticksFixos = array com os valores que aparecem no eixo Y
-    function criarGrafico(canvasId, labels, valores, ticksFixos) {
+    // ── Dados passados do PHP para o JS ──
+    var dados = {
+        1: {
+            labels:  <?php echo json_encode($g1_labels); ?>,
+            lucro:   <?php echo json_encode($g1_lucro); ?>,
+            receita: <?php echo json_encode($g1_receita); ?>,
+            despesa: <?php echo json_encode($g1_despesa); ?>
+        },
+        2: {
+            labels:  <?php echo json_encode($g2_labels); ?>,
+            lucro:   <?php echo json_encode($g2_lucro); ?>,
+            receita: <?php echo json_encode($g2_receita); ?>,
+            despesa: <?php echo json_encode($g2_despesa); ?>
+        },
+        3: {
+            labels:  <?php echo json_encode($g3_labels); ?>,
+            lucro:   <?php echo json_encode($g3_lucro); ?>,
+            receita: <?php echo json_encode($g3_receita); ?>,
+            despesa: <?php echo json_encode($g3_despesa); ?>
+        }
+    };
+
+    // Série ativa: 'lucro', 'receita' ou 'despesa'
+    var serieAtiva = 'lucro';
+    var periodoAtivo = 1;
+
+    var corSerie = {
+        lucro:   { linha: '#008CFF', fundo: 'rgba(0,140,255,0.08)',  ponto: '#008CFF' },
+        receita: { linha: '#10B981', fundo: 'rgba(16,185,129,0.08)', ponto: '#10B981' },
+        despesa: { linha: '#EF4444', fundo: 'rgba(239,68,68,0.08)',  ponto: '#EF4444' }
+    };
+
+    var nomeSerie = { lucro: 'Lucro líquido', receita: 'Receita', despesa: 'Despesas' };
+
+    // Formata número como R$ com separadores
+    function fmt(v) {
+        return 'R$ ' + new Intl.NumberFormat('pt-BR', {
+            minimumFractionDigits: 2, maximumFractionDigits: 2
+        }).format(v || 0);
+    }
+
+    // Calcula ticks automáticos baseados no maior valor de todas as séries do período
+    function calcularTicks(d) {
+        var todos = d.lucro.concat(d.receita).concat(d.despesa);
+        var maxVal = Math.max.apply(null, todos.concat([0]));
+        if (maxVal === 0) return [0, 1000, 5000, 10000, 50000, 100000];
+        var mag   = Math.pow(10, Math.floor(Math.log10(maxVal)));
+        var passo = Math.ceil((maxVal * 1.3) / (5 * mag)) * mag;
+        var ticks = [];
+        for (var i = 0; i <= 5; i++) ticks.push(i * passo);
+        return ticks;
+    }
+
+    // Cria o gráfico de linha para um canvas
+    function criarGrafico(canvasId, d) {
         var el = document.getElementById(canvasId);
         if (!el) return null;
+        var ticks = calcularTicks(d);
+        var cor   = corSerie[serieAtiva];
+
         return new Chart(el.getContext('2d'), {
-            type: 'bar',
+            type: 'line',
             data: {
-                labels: labels,
+                labels: d.labels,
                 datasets: [{
-                    data: valores,
-                    backgroundColor: 'rgba(0,140,255,0.12)',
-                    borderColor: '#008CFF',
-                    borderWidth: 2,
-                    borderRadius: 6
+                    label: nomeSerie[serieAtiva],
+                    data: d[serieAtiva],
+                    borderColor: cor.linha,
+                    backgroundColor: cor.fundo,
+                    borderWidth: 2.5,
+                    pointBackgroundColor: cor.ponto,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    tension: 0.4,  // curva suave
+                    fill: true
                 }]
             },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
-                animation: { duration: 400 },
+                interaction: {
+                    mode: 'index',       // tooltip mostra todos os valores do ponto
+                    intersect: false     // ativa mesmo sem estar exatamente em cima do ponto
+                },
                 plugins: {
                     legend: { display: false },
                     tooltip: {
+                        backgroundColor: 'rgba(13,17,23,0.92)',
+                        titleColor: '#E6EDF3',
+                        bodyColor: '#8B949E',
+                        borderColor: '#30363D',
+                        borderWidth: 1,
+                        padding: 12,
                         callbacks: {
-                            label: function(c) {
-                                return 'R$ ' + new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2 }).format(c.parsed.y);
+                            title: function(items) {
+                                return items[0].label;
+                            },
+                            // Tooltip mostra as 3 métricas sempre, independente da série ativa
+                            beforeBody: function(items) { return ''; },
+                            label: function() { return null; }, // desativa label padrão
+                            afterBody: function(items) {
+                                var i   = items[0].dataIndex;
+                                var rec = d.receita[i] || 0;
+                                var des = d.despesa[i] || 0;
+                                var luc = d.lucro[i]   || 0;
+                                return [
+                                    'Receita:         ' + fmt(rec),
+                                    'Despesas:      ' + fmt(des),
+                                    '──────────────────',
+                                    'Lucro líquido: ' + fmt(luc)
+                                ];
                             }
                         }
                     }
                 },
                 scales: {
                     y: {
-                        min: ticksFixos[0],
-                        max: ticksFixos[ticksFixos.length - 1],
-                        grid: { color: 'rgba(0,0,0,0.04)' },
+                        min: 0,
+                        max: ticks[ticks.length - 1],
+                        grid: { color: 'rgba(128,128,128,0.08)' },
                         afterBuildTicks: function(axis) {
-                            // Substitui os ticks automáticos pelos nossos valores fixos
-                            axis.ticks = ticksFixos.map(function(v) { return { value: v }; });
+                            axis.ticks = ticks.map(function(v) { return { value: v }; });
                         },
                         ticks: {
                             callback: function(v) {
-                                if (v >= 1000) return 'R$ ' + v.toLocaleString('pt-BR');
+                                if (v >= 1000000) return 'R$ ' + (v/1000000).toFixed(1) + 'M';
+                                if (v >= 1000)    return 'R$ ' + (v/1000).toFixed(0) + 'k';
                                 return 'R$ ' + v;
                             },
                             font: { size: 11 }
                         },
-                        afterFit: function(axis) { axis.width = 95; }
+                        afterFit: function(axis) { axis.width = 80; }
                     },
-                    x: { grid: { display: false } }
+                    x: {
+                        grid: { display: false },
+                        ticks: { font: { size: 11 } }
+                    }
                 }
             }
         });
     }
 
-    // Criando os 3 gráficos com suas escalas
-    var chart1 = criarGrafico('grafico1', g1_labels, g1_valores, [0, 500, 1000, 2000, 3000, 4000, 5000]);
-    var chart2 = criarGrafico('grafico2', g2_labels, g2_valores, [0, 5000, 10000, 20000, 30000, 40000, 50000]);
-    var chart3 = criarGrafico('grafico3', g3_labels, g3_valores, [0, 50000, 75000, 100000, 125000, 150000, 200000]);
-
-    // ── Seletor de período ──
-    var periodoAtivo = 1;
-    var titulos = {
-        1: 'Lucro líquido — últimos 30 dias',
-        2: 'Lucro líquido — últimos 3 meses',
-        3: 'Lucro líquido — últimos 6 meses'
+    // Cria os 3 gráficos
+    var charts = {
+        1: criarGrafico('grafico1', dados[1]),
+        2: criarGrafico('grafico2', dados[2]),
+        3: criarGrafico('grafico3', dados[3])
     };
 
-    // window.trocarGrafico torna a função acessível pelo onclick="" dos botões
-    // Funções dentro do window.onload ficam em escopo privado por padrão
+    // Atualiza todos os gráficos quando muda a série ou o período
+    function atualizarSerie() {
+        var cor = corSerie[serieAtiva];
+        [1, 2, 3].forEach(function(p) {
+            var c = charts[p];
+            if (!c) return;
+            var ticks = calcularTicks(dados[p]);
+            c.data.datasets[0].data            = dados[p][serieAtiva];
+            c.data.datasets[0].label           = nomeSerie[serieAtiva];
+            c.data.datasets[0].borderColor      = cor.linha;
+            c.data.datasets[0].backgroundColor  = cor.fundo;
+            c.data.datasets[0].pointBackgroundColor = cor.ponto;
+            c.options.scales.y.max = ticks[ticks.length - 1];
+            // Atualiza os ticks no próximo render
+            c.options.scales.y.afterBuildTicks = function(axis) {
+                axis.ticks = ticks.map(function(v) { return { value: v }; });
+            };
+            c.update();
+        });
+    }
+
+    // Alternador de série — botões de radio
+    window.trocarSerie = function(serie) {
+        serieAtiva = serie;
+        // Atualiza estilo dos botões
+        ['lucro','receita','despesa'].forEach(function(s) {
+            var btn = document.getElementById('btn-serie-' + s);
+            if (!btn) return;
+            var dot = btn.querySelector('.radio-dot');
+            if (s === serie) {
+                btn.classList.add('ativo');
+                if (dot) dot.style.background = corSerie[s].linha;
+            } else {
+                btn.classList.remove('ativo');
+                if (dot) dot.style.background = 'transparent';
+            }
+        });
+        atualizarSerie();
+    };
+
+    // ── Seletor de período ──
+    var titulos = {
+        1: 'Últimos 30 dias',
+        2: 'Últimos 3 meses',
+        3: 'Últimos 6 meses'
+    };
+
     window.trocarGrafico = function(numero) {
         document.getElementById('wrap-g' + periodoAtivo).style.display = 'none';
         document.getElementById('wrap-g' + numero).style.display       = 'block';
@@ -695,13 +902,9 @@ window.onload = function() {
         document.getElementById('btn-p' + periodoAtivo).classList.remove('ativo');
         document.getElementById('btn-p' + numero).classList.add('ativo');
         periodoAtivo = numero;
-        // update() redesenha o gráfico após ele ficar visível
-        if (numero === 1 && chart1) chart1.update();
-        if (numero === 2 && chart2) chart2.update();
-        if (numero === 3 && chart3) chart3.update();
+        if (charts[numero]) charts[numero].update();
     };
 
-    // ── Toggle do seletor de período ──
     var seletorAberto = false;
     function toggleSeletor() {
         seletorAberto = !seletorAberto;

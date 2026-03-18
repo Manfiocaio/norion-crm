@@ -149,10 +149,12 @@ if ($acao === 'exportar_csv') {
     ], ';');
 
     $status_labels = [
-        'novo'       => 'Novo',
-        'em_contato' => 'Em contato',
-        'fechado'    => 'Fechado',
-        'perdido'    => 'Perdido',
+        'novo'             => 'Novo',
+        'em_contato'       => 'Em contato',
+        'proposta_enviada' => 'Proposta enviada',
+        'negociacao'       => 'Negociação',
+        'fechado'          => 'Fechado',
+        'perdido'          => 'Perdido',
     ];
 
     while ($row = mysqli_fetch_assoc($resultado)) {

@@ -8,7 +8,74 @@ require_once 'config/db.php';
 require_once 'config/permissoes.php';
 requer_permissao('ver_dashboard');
 $pagina_atual = 'dashboard';
-$nome = nome_usuario(); // função do permissoes.php — funciona para admin e colaborador
+$nome = nome_usuario();
+
+// ============================================================
+// AÇÃO: Salvar / alterar / zerar meta mensal
+// ============================================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['acao_meta']) && eh_admin()) {
+
+    $mes_date = date('Y-m-01'); // Primeiro dia do mês atual
+    $mes_e    = mysqli_real_escape_string($conexao, $mes_date);
+
+    if (isset($_POST['meta_zerar'])) {
+        // Remove a meta do mês
+        mysqli_query($conexao, "DELETE FROM metas WHERE mes = '$mes_e'");
+    } else {
+        $valor_raw = str_replace(',', '.', trim($_POST['meta_valor'] ?? '0'));
+        $valor     = is_numeric($valor_raw) ? (float)$valor_raw : 0;
+
+        if ($valor > 0) {
+            // INSERT se não existe, UPDATE se já existe (UPSERT)
+            mysqli_query($conexao,
+                "INSERT INTO metas (mes, valor)
+                 VALUES ('$mes_e', $valor)
+                 ON DUPLICATE KEY UPDATE valor = $valor"
+            );
+        }
+    }
+
+    // Redireciona para evitar resubmissão ao recarregar (PRG pattern)
+    // PRG = Post-Redirect-Get: redireciona para GET depois de um POST
+    header("Location: dashboard.php");
+    exit();
+}
+
+// ============================================================
+// META DO MÊS ATUAL
+// ============================================================
+// DATE_FORMAT(CURDATE(), '%Y-%m-01') = primeiro dia do mês atual
+$r_meta  = mysqli_query($conexao,
+    "SELECT valor FROM metas WHERE mes = DATE_FORMAT(CURDATE(), '%Y-%m-01')"
+);
+$meta_mes = $r_meta && mysqli_num_rows($r_meta) > 0
+    ? (float)mysqli_fetch_assoc($r_meta)['valor']
+    : 0;
+// mes_atual no formato YYYY-MM para o input do dashboard
+$mes_atual = date('Y-m');
+
+// ============================================================
+// LEMBRETES URGENTES — vencidos ou vencem em até 1 dia
+// ============================================================
+$criado_por_filtro_dash = eh_admin()
+    ? ""
+    : "AND (criado_por = " . (int)$_SESSION['colab_id'] . " OR criado_por IS NULL)";
+
+$r_lemb = mysqli_query($conexao,
+    "SELECT l.*, ld.nome as lead_nome, ld.id as lead_id_num
+     FROM lembretes l
+     JOIN leads ld ON ld.id = l.lead_id
+     WHERE l.concluido = 0
+       AND l.data_hora <= DATE_ADD(NOW(), INTERVAL 1 DAY)
+       $criado_por_filtro_dash
+     ORDER BY l.data_hora ASC
+     LIMIT 10"
+);
+$lembretes_urgentes = [];
+while ($row = mysqli_fetch_assoc($r_lemb)) {
+    $lembretes_urgentes[] = $row;
+}
+$total_urgentes = count($lembretes_urgentes);
 
 // ============================================================
 // BLOCO 1: Métricas gerais de leads
@@ -26,10 +93,12 @@ while ($row = mysqli_fetch_assoc($r)) {
     $total_leads += $row['qtd'];
 }
 
-$total_novos      = $por_status['novo']       ?? 0;
-$total_contato    = $por_status['em_contato'] ?? 0;
-$total_fechados   = $por_status['fechado']    ?? 0;
-$total_perdidos   = $por_status['perdido']    ?? 0;
+$total_novos           = $por_status['novo']             ?? 0;
+$total_contato         = $por_status['em_contato']       ?? 0;
+$total_proposta        = $por_status['proposta_enviada'] ?? 0;
+$total_negociacao      = $por_status['negociacao']       ?? 0;
+$total_fechados        = $por_status['fechado']          ?? 0;
+$total_perdidos        = $por_status['perdido']          ?? 0;
 
 // ============================================================
 // BLOCO 2: Taxa de conversão
@@ -154,7 +223,8 @@ $ultimos_leads = mysqli_query($conexao,
 );
 ?>
 <!DOCTYPE html>
-<html lang="pt-BR">
+<?php $__dark = isset($_COOKIE['norion_tema']) && $_COOKIE['norion_tema'] === 'dark'; ?>
+<html lang="pt-BR" class="<?php echo $__dark ? 'dark' : ''; ?>">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -162,6 +232,91 @@ $ultimos_leads = mysqli_query($conexao,
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
     <style>
+        /* ── Grids do dashboard ── */
+        .dash-grid-4 {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }
+        .dash-grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        @media (max-width: 1024px) {
+            .dash-grid-4 { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 768px) {
+            .dash-grid-4 { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+            .dash-grid-2 { grid-template-columns: 1fr; gap: 12px; }
+        }
+        @media (max-width: 480px) {
+            .dash-grid-4 { grid-template-columns: 1fr; }
+        }
+        /* ── Barra de meta ── */
+        .meta-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 18px 20px;
+            margin-bottom: 20px;
+        }
+        .meta-header {
+            display: flex; align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px; gap: 12px;
+        }
+        .meta-titulo {
+            font-size: 13px; font-weight: 700;
+            color: var(--text-1);
+        }
+        .meta-valores {
+            font-size: 12px; color: var(--text-3);
+            white-space: nowrap;
+        }
+        .meta-valores strong { color: var(--text-1); }
+        .meta-barra-bg {
+            height: 10px; background: var(--border);
+            border-radius: 10px; overflow: hidden;
+            margin-bottom: 8px;
+        }
+        .meta-barra {
+            height: 100%; border-radius: 10px;
+            transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+            /* Cor muda conforme o progresso */
+        }
+        .meta-rodape {
+            display: flex; align-items: center;
+            justify-content: space-between; gap: 12px;
+        }
+        .meta-pct {
+            font-size: 22px; font-weight: 800;
+            letter-spacing: -0.5px; line-height: 1;
+        }
+        .meta-faltam {
+            font-size: 12px; color: var(--text-3);
+        }
+        /* Formulário inline de edição da meta (só admin) */
+        .meta-form {
+            display: flex; align-items: center; gap: 6px;
+        }
+        .meta-input {
+            height: 30px; width: 130px;
+            border: 1px solid var(--border-2);
+            border-radius: var(--radius);
+            padding: 0 10px 0 22px;
+            font-size: 12px; font-family: 'Manrope', sans-serif;
+            color: var(--text-1); background: var(--surface-2);
+            outline: none; transition: border-color 0.15s;
+        }
+        .meta-input:focus { border-color: var(--azul); background: var(--surface); }
+        .meta-input-wrap { position: relative; }
+        .meta-input-prefix {
+            position: absolute; left: 8px; top: 50%;
+            transform: translateY(-50%);
+            font-size: 11px; color: var(--text-3); font-weight: 600;
+            pointer-events: none;
+        }
         /* ── Barra de progresso genérica ── */
         .progress-wrap {
             height: 6px;
@@ -316,8 +471,164 @@ $ultimos_leads = mysqli_query($conexao,
 
     <div class="page-content">
 
+        <!-- ── Barra de meta mensal ── -->
+        <?php
+        $pct_meta  = ($meta_mes > 0 && $faturamento_mes > 0)
+            ? min(round(($faturamento_mes / $meta_mes) * 100, 1), 100) : 0;
+        $falta     = max($meta_mes - $faturamento_mes, 0);
+        $cor_barra = $pct_meta >= 80 ? 'var(--verde)'
+                   : ($pct_meta >= 40 ? 'var(--amarelo)' : 'var(--vermelho)');
+        $dias_restantes      = (int)date('t') - (int)date('j');
+        $por_dia_necessario  = ($dias_restantes > 0 && $falta > 0)
+            ? round($falta / $dias_restantes, 2) : 0;
+        // Mês em português
+        $meses_pt = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho',
+                     'Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+        $mes_label = $meses_pt[(int)date('n') - 1] . ' ' . date('Y');
+        ?>
+        <div class="meta-card">
+            <div class="meta-header">
+                <!-- Título + mês -->
+                <div>
+                    <div class="meta-titulo">
+                        Meta de vendas
+                        <span style="color:var(--text-3);font-weight:500;font-size:12px;">
+                            — <?php echo $mes_label; ?>
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Valor atual vs meta -->
+                <div class="meta-valores">
+                    <strong style="color:var(--verde);">
+                        R$ <?php echo number_format($faturamento_mes,2,',','.'); ?>
+                    </strong>
+                    <?php if ($meta_mes > 0): ?>
+                        de R$ <?php echo number_format($meta_mes,2,',','.'); ?>
+                    <?php else: ?>
+                        <span style="color:var(--text-3);">— Meta não definida</span>
+                    <?php endif; ?>
+                </div>
+
+                <!-- Formulário POST direto — só admin -->
+                <?php if (eh_admin()): ?>
+                <form method="post" action="dashboard.php"
+                      style="display:flex;align-items:center;gap:6px;">
+                    <input type="hidden" name="acao_meta" value="1">
+                    <div class="meta-input-wrap">
+                        <span class="meta-input-prefix">R$</span>
+                        <input class="meta-input" type="number"
+                            name="meta_valor"
+                            placeholder="Meta do mês"
+                            step="100" min="0"
+                            value="<?php echo $meta_mes > 0 ? (int)$meta_mes : ''; ?>">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm"
+                        style="height:34px;font-size:12px;padding:0 14px;white-space:nowrap;">
+                        <?php echo $meta_mes > 0 ? '✏️ Alterar' : 'Definir'; ?>
+                    </button>
+                    <?php if ($meta_mes > 0): ?>
+                    <button type="submit" name="meta_zerar" value="1"
+                        class="btn btn-secondary btn-sm"
+                        style="height:34px;font-size:12px;padding:0 10px;"
+                        onclick="return confirm('Remover a meta deste mês?')">
+                        ✕
+                    </button>
+                    <?php endif; ?>
+                </form>
+                <?php endif; ?>
+            </div>
+
+            <!-- Barra de progresso -->
+            <div class="meta-barra-bg">
+                <div class="meta-barra"
+                     style="width:<?php echo $pct_meta; ?>%;
+                            background:<?php echo $meta_mes > 0 ? $cor_barra : 'var(--border)'; ?>;
+                            transition:width 0.8s ease;">
+                </div>
+            </div>
+
+            <!-- Rodapé com info -->
+            <div class="meta-rodape">
+                <div>
+                    <div class="meta-pct" style="color:<?php echo $meta_mes > 0 ? $cor_barra : 'var(--text-3)'; ?>;">
+                        <?php echo $meta_mes > 0 ? $pct_meta . '%' : '—'; ?>
+                    </div>
+                    <div class="meta-faltam">
+                        <?php if ($meta_mes <= 0): ?>
+                            Defina uma meta para acompanhar o progresso
+                        <?php elseif ($faturamento_mes >= $meta_mes): ?>
+                            🎉 Meta atingida! Parabéns!
+                        <?php else: ?>
+                            Faltam R$ <?php echo number_format($falta,2,',','.'); ?> para a meta
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <?php if ($meta_mes > 0 && $falta > 0 && $dias_restantes > 0): ?>
+                <div style="text-align:right;">
+                    <div style="font-size:12px;color:var(--text-3);">
+                        <?php echo $dias_restantes; ?> dias restantes
+                    </div>
+                    <div style="font-size:11px;color:var(--text-3);margin-top:2px;">
+                        ~R$ <?php echo number_format($por_dia_necessario,2,',','.'); ?> por dia
+                    </div>
+                </div>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <!-- ── Alertas de lembretes urgentes ── -->
+        <?php if ($total_urgentes > 0): ?>
+        <div style="margin-bottom:16px;">
+            <?php
+            $tipos_ico = [
+                'reuniao'         => '🤝',
+                'follow_up'       => '📞',
+                'enviar_proposta' => '📄',
+            ];
+            foreach ($lembretes_urgentes as $lem):
+                $dt       = new DateTime($lem['data_hora']);
+                $agora    = new DateTime();
+                $vencido  = $dt < $agora;
+                $bg       = $vencido ? 'var(--vermelho-light)' : 'var(--amarelo-light)';
+                $borda    = $vencido ? '#FECACA' : '#FCD34D';
+                $cor_txt  = $vencido ? 'var(--vermelho-text)' : 'var(--amarelo-text)';
+                $ico      = $tipos_ico[$lem['tipo']] ?? '📌';
+                $prazo    = $vencido
+                    ? 'Vencido — ' . $dt->format('d/m H:i')
+                    : 'Hoje às ' . $dt->format('H:i');
+            ?>
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;background:<?php echo $bg; ?>;border:1px solid <?php echo $borda; ?>;border-radius:var(--radius-lg);margin-bottom:8px;">
+                <span style="font-size:18px;"><?php echo $ico; ?></span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:13px;font-weight:700;color:<?php echo $cor_txt; ?>;">
+                        <?php echo htmlspecialchars($lem['titulo']); ?>
+                    </div>
+                    <div style="font-size:11px;color:<?php echo $cor_txt; ?>;opacity:0.8;margin-top:2px;">
+                        <?php echo $prazo; ?>
+                        · Lead: <strong><?php echo htmlspecialchars($lem['lead_nome']); ?></strong>
+                    </div>
+                </div>
+                <a href="leads_editar.php?id=<?php echo $lem['lead_id_num']; ?>&aba=lembretes"
+                   class="btn btn-sm"
+                   style="background:<?php echo $vencido ? 'var(--vermelho)' : 'var(--amarelo)'; ?>;color:white;border:none;white-space:nowrap;">
+                    Ver lead →
+                </a>
+                <form action="lembrete_salvar.php" method="post" style="display:inline;">
+                    <input type="hidden" name="acao" value="concluir">
+                    <input type="hidden" name="id" value="<?php echo $lem['id']; ?>">
+                    <input type="hidden" name="lead_id" value="<?php echo $lem['lead_id_num']; ?>">
+                    <button type="submit" class="btn btn-sm"
+                        style="background:rgba(0,0,0,0.1);color:<?php echo $cor_txt; ?>;border:none;"
+                        title="Marcar como concluído">✓ Concluir</button>
+                </form>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+
         <!-- ── Linha 1: Cards de métricas rápidas ── -->
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
+        <div class="dash-grid-4" style="margin-bottom:20px;">
 
             <div class="metric-card">
                 <div class="metric-label">Total de leads</div>
@@ -349,7 +660,7 @@ $ultimos_leads = mysqli_query($conexao,
         </div>
 
         <!-- ── Linha 2: Conversão + Origens ── -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+        <div class="dash-grid-2" style="margin-bottom:16px;">
 
             <!-- Card: Funil de leads (status) -->
             <div class="card">
@@ -391,10 +702,12 @@ $ultimos_leads = mysqli_query($conexao,
                     <div class="donut-legenda">
                         <?php
                         $itens_funil = [
-                            ['Novos',       $total_novos,    '#008CFF'],
-                            ['Em contato',  $total_contato,  '#F59E0B'],
-                            ['Fechados',    $total_fechados, '#10B981'],
-                            ['Perdidos',    $total_perdidos, '#EF4444'],
+                            ['Novos',            $total_novos,       '#008CFF'],
+                            ['Em contato',       $total_contato,     '#F59E0B'],
+                            ['Proposta enviada', $total_proposta,    '#7C3AED'],
+                            ['Negociação',       $total_negociacao,  '#F97316'],
+                            ['Fechados',         $total_fechados,    '#10B981'],
+                            ['Perdidos',         $total_perdidos,    '#EF4444'],
                         ];
                         foreach ($itens_funil as [$label, $qtd, $cor]):
                         ?>
@@ -460,7 +773,7 @@ $ultimos_leads = mysqli_query($conexao,
         </div>
 
         <!-- ── Linha 3: Ticket médio + Tempo médio + Últimos leads ── -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+        <div class="dash-grid-2" style="margin-bottom:16px;">
 
             <!-- Card: Ticket médio por mês (gráfico) -->
             <div class="card">
@@ -580,9 +893,11 @@ $ultimos_leads = mysqli_query($conexao,
                         <td><?php
                             $map = [
                                 'novo'       => ['badge-novo',    'Novo'],
-                                'em_contato' => ['badge-contato', 'Em contato'],
-                                'fechado'    => ['badge-fechado', 'Fechado'],
-                                'perdido'    => ['badge-perdido', 'Perdido'],
+                                'em_contato'       => ['badge-contato',   'Em contato'],
+                                'proposta_enviada' => ['badge-proposta',  'Proposta enviada'],
+                                'negociacao'       => ['badge-negociacao','Negociação'],
+                                'fechado'          => ['badge-fechado',   'Fechado'],
+                                'perdido'          => ['badge-perdido',   'Perdido'],
                             ];
                             [$cls,$lbl] = $map[$l['status']] ?? ['badge-novo',$l['status']];
                             echo "<span class=\"badge $cls\">$lbl</span>";
@@ -654,8 +969,7 @@ $ultimos_leads = mysqli_query($conexao,
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script>
-window.onload = function() {
-
+// ── Salvar meta via AJAX ──
     <?php if (!empty($ticket_labels)): ?>
     // Gráfico de ticket médio por mês
     var labels  = <?php echo json_encode($ticket_labels); ?>;
@@ -702,11 +1016,13 @@ window.onload = function() {
                     ticks: {
                         font: { size: 10 },
                         callback: function(v) {
-                            // Formata valores grandes de forma compacta
-                            // Ex: 1500 → "R$ 1,5k"  |  500 → "R$ 500"
-                            if (v >= 1000) return 'R$ ' + (v/1000).toFixed(1) + 'k';
+                            // Escala automática — formato compacto para qualquer valor
+                            if (v >= 1000000) return 'R$ ' + (v/1000000).toFixed(1) + 'M';
+                            if (v >= 1000)    return 'R$ ' + (v/1000).toFixed(0) + 'k';
                             return 'R$ ' + v;
-                        }
+                        },
+                        // Deixa o Chart.js calcular os ticks automaticamente
+                        maxTicksLimit: 6
                     }
                 },
                 x: {

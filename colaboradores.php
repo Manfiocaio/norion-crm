@@ -252,7 +252,8 @@ function url_filtro($params) {
 }
 ?>
 <!DOCTYPE html>
-<html lang="pt-BR">
+<?php $__dark = isset($_COOKIE['norion_tema']) && $_COOKIE['norion_tema'] === 'dark'; ?>
+<html lang="pt-BR" class="<?php echo $__dark ? 'dark' : ''; ?>">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Norion CRM — Colaboradores</title>

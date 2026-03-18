@@ -2,6 +2,7 @@
 session_start();
 require_once 'config/db.php';
 require_once 'config/permissoes.php';
+require_once 'config/log.php';
 requer_permissao('editar_leads');
 $pagina_atual = 'leads';
 
@@ -30,11 +31,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_lead'])) {
         $mensagem = "O nome é obrigatório."; $tipo = "error"; $fase = 1;
     } else {
         $nome_e = mysqli_real_escape_string($conexao, $nome);
-        $sql = "INSERT INTO leads (nome, telefone, email, origem, status, tipo_proposta, possivel_ganho, etiqueta, observacoes)
-                VALUES ('$nome_e','$telefone','$email','$origem','$status','$tipo_proposta',$possivel_ganho,'$etiqueta','$observacoes')";
+
+        // Quem está criando o lead
+        $cp_tipo = eh_admin() ? 'admin' : 'colaborador';
+        $cp_id   = eh_admin() ? 'NULL' : (int)($_SESSION['colab_id'] ?? 0);
+
+        $sql = "INSERT INTO leads (nome, telefone, email, origem, status, tipo_proposta, possivel_ganho, etiqueta, observacoes, criado_por_tipo, criado_por_id)
+                VALUES ('$nome_e','$telefone','$email','$origem','$status','$tipo_proposta',$possivel_ganho,'$etiqueta','$observacoes','$cp_tipo',$cp_id)";
         if (mysqli_query($conexao, $sql)) {
             $novo_id = mysqli_insert_id($conexao);
             $_SESSION['lead_novo_id'] = $novo_id;
+            registrar_log($conexao, $novo_id, 'criou',
+                "Lead \"$nome\" cadastrado" . ($status ? " com status \"$status\"" : ''));
             $mensagem = "Lead cadastrado! Registre o primeiro contato ou clique em Concluir.";
             $tipo = "success"; $fase = 2;
         } else {
@@ -70,14 +78,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['concluir'])) {
 $tipos_proposta = ['Site', 'Software sob medida', 'Fluxo de IA', 'Agente de IA', 'Landing Page', 'Outro'];
 ?>
 <!DOCTYPE html>
-<html lang="pt-BR">
+<?php $__dark = isset($_COOKIE['norion_tema']) && $_COOKIE['norion_tema'] === 'dark'; ?>
+<html lang="pt-BR" class="<?php echo $__dark ? 'dark' : ''; ?>">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Norion CRM — Novo Lead</title>
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
     <style>
-        .page-wrap { max-width: 700px; }
+        .page-wrap { width: 100%; }
         .secao-titulo { font-size:13px; font-weight:700; color:var(--text-1); margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid var(--border); }
         .fase-2 { animation: slideDown 0.25s ease; }
         @keyframes slideDown { from{opacity:0;transform:translateY(-10px)} to{opacity:1;transform:translateY(0)} }
@@ -92,7 +101,7 @@ $tipos_proposta = ['Site', 'Software sob medida', 'Fluxo de IA', 'Agente de IA',
         /* Grid de tipos de proposta — botões visuais */
         .proposta-grid {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(6, 1fr);
             gap: 8px;
             margin-top: 6px;
         }
@@ -177,7 +186,7 @@ $tipos_proposta = ['Site', 'Software sob medida', 'Fluxo de IA', 'Agente de IA',
                     <div class="form-group">
                         <label class="form-label">Status</label>
                         <select class="form-control" name="status">
-                            <?php foreach(['novo'=>'Novo','em_contato'=>'Em contato','fechado'=>'Fechado','perdido'=>'Perdido'] as $v=>$r):
+                            <?php foreach(['novo'=>'Novo','em_contato'=>'Em contato','proposta_enviada'=>'Proposta enviada','negociacao'=>'Negociação','fechado'=>'Fechado','perdido'=>'Perdido'] as $v=>$r):
                                 $s=(isset($_POST['status'])&&$_POST['status']===$v)?'selected':($v==='novo'?'selected':''); ?>
                                 <option value="<?php echo $v; ?>" <?php echo $s; ?>><?php echo $r; ?></option>
                             <?php endforeach; ?>

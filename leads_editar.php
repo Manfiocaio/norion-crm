@@ -6,6 +6,7 @@
 session_start();
 require_once 'config/db.php';
 require_once 'config/permissoes.php';
+require_once 'config/log.php';
 // Ver leads é necessário para abrir; editar leads para salvar alterações
 requer_permissao('ver_leads');
 $pode_editar_leads = tem_permissao('editar_leads');
@@ -87,16 +88,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_doc'])) {
                 // É mais seguro que copy() para uploads porque valida que o arquivo
                 // realmente veio de um upload HTTP
                 if (move_uploaded_file($tmp, $destino)) {
-
                     $nome_e = mysqli_real_escape_string($conexao, $nome_original);
                     $unico_e = mysqli_real_escape_string($conexao, $nome_unico);
                     $mime_e  = mysqli_real_escape_string($conexao, $tipo_mime);
-
                     mysqli_query($conexao,
                         "INSERT INTO documentos (lead_id, nome_original, nome_arquivo, tamanho, tipo_mime)
                          VALUES ($id, '$nome_e', '$unico_e', $tamanho, '$mime_e')"
                     );
-
+                    registrar_log($conexao, $id, 'arquivo_enviado',
+                        "\"$nome_original\" (" . round($tamanho / 1024) . " KB)");
                     header("Location: leads_editar.php?id=$id#documentos");
                     exit();
                 } else {
@@ -164,17 +164,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_lead'])) {
     if (empty($nome)) {
         $mensagem = "O nome é obrigatório."; $tipo = "error";
     } else {
+        // Busca dados ANTES de salvar para comparar o que mudou
+        $antes = mysqli_fetch_assoc(mysqli_query($conexao, "SELECT status, valor, nome FROM leads WHERE id=$id"));
+        $status_antes = $antes['status'] ?? '';
+        $valor_antes  = (float)($antes['valor'] ?? 0);
+
         $n  = mysqli_real_escape_string($conexao, $nome);
         $t  = mysqli_real_escape_string($conexao, $telefone);
         $e  = mysqli_real_escape_string($conexao, $email);
         $oe = mysqli_real_escape_string($conexao, $observacoes);
 
+        // Salva atribuição se a coluna existir e for admin
+        $col_atr2 = mysqli_query($conexao, "SHOW COLUMNS FROM leads LIKE 'atribuido_para'");
+        $tem_atr2 = $col_atr2 && mysqli_num_rows($col_atr2) > 0;
+        $atrib_id = isset($_POST['atribuido_para']) && is_numeric($_POST['atribuido_para']) && (int)$_POST['atribuido_para'] > 0
+            ? (int)$_POST['atribuido_para'] : 'NULL';
+        $set_atrib = ($tem_atr2 && eh_admin()) ? ", atribuido_para=$atrib_id" : '';
+
         mysqli_query($conexao,
             "UPDATE leads SET nome='$n',telefone='$t',email='$e',
              origem='$origem',status='$status',observacoes='$oe',valor=$valor,
              tipo_proposta='$tipo_proposta',possivel_ganho=$possivel_ganho,etiqueta='$etiqueta'
+             $set_atrib
              WHERE id=$id"
         );
+
+        // ── Log do que foi alterado ──
+        $labels_status = [
+            'novo'=>'Novo','em_contato'=>'Em contato','proposta_enviada'=>'Proposta enviada',
+            'negociacao'=>'Negociação','fechado'=>'Fechado','perdido'=>'Perdido',
+        ];
+
+        if ($status !== $status_antes) {
+            $de_txt  = $labels_status[$status_antes] ?? $status_antes;
+            $para_txt = $labels_status[$status] ?? $status;
+            if ($status === 'fechado') {
+                registrar_log($conexao, $id, 'fechou',
+                    "Negócio fechado" . ($valor > 0 ? " por R$ " . number_format($valor, 2, ',', '.') : ''));
+            } else {
+                registrar_log($conexao, $id, 'status_alterado',
+                    "Status: \"$de_txt\" → \"$para_txt\"");
+            }
+        } elseif ($valor > 0 && $valor !== $valor_antes) {
+            $de_fmt   = number_format($valor_antes, 2, ',', '.');
+            $para_fmt = number_format($valor, 2, ',', '.');
+            registrar_log($conexao, $id, 'valor_alterado',
+                "Valor: R$ $de_fmt → R$ $para_fmt");
+        } else {
+            registrar_log($conexao, $id, 'editou', null);
+        }
 
         if ($status === 'fechado' && $valor > 0) {
             $v = mysqli_query($conexao, "SELECT id FROM vendas WHERE lead_id=$id");
@@ -216,8 +254,29 @@ $total_historico = mysqli_num_rows($historico);
 $documentos      = mysqli_query($conexao, "SELECT * FROM documentos WHERE lead_id = $id ORDER BY criado_em DESC");
 $total_docs      = mysqli_num_rows($documentos);
 
-// ============================================================
-// ABA ATIVA — lida via âncora da URL
+// Lembretes do lead — filtrado por permissão
+$criado_por_filtro = eh_admin() ? "" : (
+    "AND (criado_por = " . (int)$_SESSION['colab_id'] . " OR criado_por IS NULL)"
+);
+$lembretes = mysqli_query($conexao,
+    "SELECT l.*, ld.nome as lead_nome
+     FROM lembretes l
+     JOIN leads ld ON ld.id = l.lead_id
+     WHERE l.lead_id = $id $criado_por_filtro
+     ORDER BY l.concluido ASC, l.data_hora ASC"
+);
+$total_lembretes = mysqli_num_rows($lembretes);
+
+// Log de atividades do lead
+$log_atividades = mysqli_query($conexao,
+    "SELECT * FROM log_atividades
+     WHERE lead_id = $id
+     ORDER BY criado_em DESC
+     LIMIT 50"
+);
+$total_log = mysqli_num_rows($log_atividades);
+
+// ABA ATIVA
 // ============================================================
 // Não dá para ler âncoras (#) no PHP (elas ficam no navegador)
 // Então usamos um parâmetro GET: ?aba=documentos
@@ -225,7 +284,8 @@ $aba_ativa = $_GET['aba'] ?? 'dados';
 // Padrão = aba de dados do lead
 ?>
 <!DOCTYPE html>
-<html lang="pt-BR">
+<?php $__dark = isset($_COOKIE['norion_tema']) && $_COOKIE['norion_tema'] === 'dark'; ?>
+<html lang="pt-BR" class="<?php echo $__dark ? 'dark' : ''; ?>">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -233,12 +293,12 @@ $aba_ativa = $_GET['aba'] ?? 'dados';
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
     <style>
-        .page-wrap { max-width: 720px; }
+        .page-wrap { width: 100%; }
 
         /* ── Botões visuais de proposta e etiqueta ── */
         .proposta-grid {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(6, 1fr);
             gap: 8px;
             margin-top: 6px;
         }
@@ -257,6 +317,50 @@ $aba_ativa = $_GET['aba'] ?? 'dados';
         }
         .proposta-btn:hover { border-color:var(--azul); color:var(--azul); background:var(--azul-light); }
         .proposta-btn.selecionado { border-color:var(--azul); background:var(--azul); color:white; }
+
+        /* ── Lembretes ── */
+        .lembrete-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 14px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .lembrete-item:last-child { border-bottom: none; }
+        .lembrete-item.concluido { opacity: 0.5; }
+
+        .lembrete-ico {
+            width: 34px; height: 34px; border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0; font-size: 16px;
+        }
+        .ico-reuniao        { background: #EDE9FE; }
+        .ico-follow_up      { background: #E0F2FE; }
+        .ico-enviar_proposta{ background: #D1FAE5; }
+
+        .lembrete-corpo { flex: 1; min-width: 0; }
+        .lembrete-titulo {
+            font-size: 13px; font-weight: 600;
+            color: var(--text-1); margin-bottom: 3px;
+        }
+        .lembrete-item.concluido .lembrete-titulo {
+            text-decoration: line-through;
+        }
+        .lembrete-meta {
+            font-size: 11px; color: var(--text-3);
+            display: flex; align-items: center; gap: 8px;
+        }
+        .lembrete-prazo {
+            font-size: 11px; font-weight: 600;
+            padding: 2px 8px; border-radius: 20px;
+        }
+        .prazo-ok      { background: var(--surface-2); color: var(--text-3); }
+        .prazo-hoje    { background: var(--amarelo-light); color: var(--amarelo-text); }
+        .prazo-amanha  { background: #FEF3C7; color: #92400E; }
+        .prazo-vencido { background: var(--vermelho-light); color: var(--vermelho-text); }
+        .prazo-concluido { background: var(--verde-light); color: var(--verde-text); }
+
+        .lembrete-acoes { display: flex; gap: 6px; flex-shrink: 0; }
 
         /* ── Sistema de abas ── */
         .abas-wrap {
@@ -299,6 +403,38 @@ $aba_ativa = $_GET['aba'] ?? 'dados';
             border-color: var(--azul-mid);
             color: var(--azul);
         }
+
+        /* ── Log de atividades ── */
+        .log-lista { display: flex; flex-direction: column; }
+        .log-item {
+            display: flex; align-items: flex-start;
+            gap: 12px; padding: 12px 0;
+            border-bottom: 1px solid var(--border);
+            position: relative;
+        }
+        .log-item:last-child { border-bottom: none; }
+        .log-item::before {
+            content: ''; position: absolute;
+            left: 16px; top: 46px; bottom: -1px;
+            width: 1px; background: var(--border);
+        }
+        .log-item:last-child::before { display: none; }
+        .log-ico {
+            width: 34px; height: 34px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0; z-index: 1;
+        }
+        .log-ico svg { width: 14px; height: 14px; }
+        .log-corpo { flex: 1; min-width: 0; padding-top: 2px; }
+        .log-linha-1 { font-size: 13px; color: var(--text-1); margin-bottom: 2px; line-height: 1.4; }
+        .log-linha-1 strong { font-weight: 700; }
+        .log-detalhe {
+            font-size: 11px; color: var(--text-3);
+            background: var(--surface-2); border: 1px solid var(--border);
+            border-radius: 6px; padding: 3px 8px;
+            display: inline-block; margin-top: 4px;
+        }
+        .log-data { font-size: 11px; color: var(--text-3); white-space: nowrap; padding-top: 2px; flex-shrink: 0; }
 
         /* ── Zona de upload ── */
         .upload-zona {
@@ -456,6 +592,20 @@ $aba_ativa = $_GET['aba'] ?? 'dados';
                 Documentos
                 <span class="aba-count"><?php echo $total_docs; ?></span>
             </a>
+            <a href="?id=<?php echo $id; ?>&aba=lembretes"
+               class="aba-btn <?php echo $aba_ativa === 'lembretes' ? 'ativa' : ''; ?>">
+                Lembretes
+                <?php if ($total_lembretes > 0): ?>
+                <span class="aba-count"><?php echo $total_lembretes; ?></span>
+                <?php endif; ?>
+            </a>
+            <a href="?id=<?php echo $id; ?>&aba=log"
+               class="aba-btn <?php echo $aba_ativa === 'log' ? 'ativa' : ''; ?>">
+                Log
+                <?php if ($total_log > 0): ?>
+                <span class="aba-count"><?php echo $total_log; ?></span>
+                <?php endif; ?>
+            </a>
         </div>
 
         <!-- ============================================================
@@ -503,7 +653,7 @@ $aba_ativa = $_GET['aba'] ?? 'dados';
                     <div class="form-group">
                         <label class="form-label">Status</label>
                         <select class="form-control" name="status" onchange="toggleVenda(this.value)">
-                            <?php foreach(['novo'=>'Novo','em_contato'=>'Em contato','fechado'=>'Fechado','perdido'=>'Perdido'] as $v=>$r):
+                            <?php foreach(['novo'=>'Novo','em_contato'=>'Em contato','proposta_enviada'=>'Proposta enviada','negociacao'=>'Negociação','fechado'=>'Fechado','perdido'=>'Perdido'] as $v=>$r):
                                 $s = ($lead['status']===$v)?'selected':''; ?>
                                 <option value="<?php echo $v; ?>" <?php echo $s; ?>><?php echo $r; ?></option>
                             <?php endforeach; ?>
@@ -555,6 +705,34 @@ $aba_ativa = $_GET['aba'] ?? 'dados';
                                 <?php echo $et; ?>
                             </button>
                         <?php endforeach; ?>
+                    </div>
+
+                <?php
+                // Campo de atribuição — só aparece se a coluna existir e for admin
+                $col_atr = mysqli_query($conexao, "SHOW COLUMNS FROM leads LIKE 'atribuido_para'");
+                if ($col_atr && mysqli_num_rows($col_atr) > 0 && eh_admin()):
+                    $colabs_r = mysqli_query($conexao, "SELECT id, nome_completo, colaborador_id FROM colaboradores WHERE status='ativo' ORDER BY nome_completo");
+                    $colabs_lista = [];
+                    while ($cr = mysqli_fetch_assoc($colabs_r)) $colabs_lista[] = $cr;
+                    if (!empty($colabs_lista)):
+                ?>
+                <div class="form-group" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+                    <label class="form-label">Responsável pelo lead</label>
+                    <select name="atribuido_para" class="form-control">
+                        <option value="">Sem responsável (todos veem)</option>
+                        <?php foreach($colabs_lista as $cl):
+                            $sel = (($lead['atribuido_para'] ?? 0) == $cl['id']) ? 'selected' : ''; ?>
+                        <option value="<?php echo $cl['id']; ?>" <?php echo $sel; ?>>
+                            <?php echo htmlspecialchars($cl['nome_completo']); ?>
+                            <span style="color:var(--text-3);">(<?php echo $cl['colaborador_id']; ?>)</span>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <div style="font-size:11px;color:var(--text-3);margin-top:4px;">
+                        Quando atribuído, apenas esse colaborador verá o lead na lista dele
+                    </div>
+                </div>
+                <?php endif; endif; ?>
                     </div>
                     <button type="button" id="btn-limpar-etiqueta"
                         onclick="limparEtiqueta()"
@@ -811,7 +989,187 @@ $aba_ativa = $_GET['aba'] ?? 'dados';
             </div>
         <?php endif; ?>
 
+        <!-- ============================================================
+             ABA 4: LEMBRETES
+             ============================================================ -->
+        <?php elseif ($aba_ativa === 'lembretes'): ?>
+
+        <?php
+        // Ícones e labels por tipo
+        $tipos_info = [
+            'reuniao'         => ['ico'=>'🤝', 'label'=>'Reunião',         'cls'=>'ico-reuniao'],
+            'follow_up'       => ['ico'=>'📞', 'label'=>'Follow-up',       'cls'=>'ico-follow_up'],
+            'enviar_proposta' => ['ico'=>'📄', 'label'=>'Enviar proposta', 'cls'=>'ico-enviar_proposta'],
+        ];
+        ?>
+
+        <!-- Formulário de novo lembrete -->
+        <?php if ($pode_editar_leads): ?>
+        <div class="card" style="margin-bottom:16px;">
+            <div style="font-size:13px;font-weight:600;color:var(--text-2);margin-bottom:14px;">
+                Novo lembrete
+            </div>
+            <form action="lembrete_salvar.php" method="post">
+                <input type="hidden" name="acao" value="criar">
+                <input type="hidden" name="lead_id" value="<?php echo $id; ?>">
+
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label class="form-label">Tipo <span class="req">*</span></label>
+                        <select class="form-control" name="tipo">
+                            <option value="">Selecione...</option>
+                            <?php foreach($tipos_info as $k => $t): ?>
+                            <option value="<?php echo $k; ?>"><?php echo $t['ico'].' '.$t['label']; ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Data e hora <span class="req">*</span></label>
+                        <input class="form-control" type="datetime-local" name="data_hora"
+                            value="<?php echo date('Y-m-d\T09:00'); ?>">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Título <span class="req">*</span></label>
+                    <input class="form-control" type="text" name="titulo"
+                        placeholder="Ex: Ligar para confirmar reunião, Enviar proposta revisada...">
+                </div>
+                <button type="submit" class="btn btn-primary btn-sm">+ Criar lembrete</button>
+            </form>
+        </div>
         <?php endif; ?>
+
+        <!-- Lista de lembretes -->
+        <div class="secao-titulo">
+            Lembretes <span class="count"><?php echo $total_lembretes; ?></span>
+        </div>
+
+        <?php if ($total_lembretes === 0): ?>
+            <div class="card">
+                <div class="empty-state">
+                    <strong>Nenhum lembrete</strong>
+                    Crie um lembrete para não esquecer de nenhum follow-up
+                </div>
+            </div>
+        <?php else: ?>
+        <div class="card">
+            <?php while ($lem = mysqli_fetch_assoc($lembretes)):
+                $info      = $tipos_info[$lem['tipo']] ?? ['ico'=>'📌','label'=>'Outro','cls'=>''];
+                $concluido = (bool)$lem['concluido'];
+                $dt        = new DateTime($lem['data_hora']);
+                $agora     = new DateTime();
+                $diff_dias = (int)$agora->diff($dt)->format('%r%a');
+
+                // Define classe e texto do prazo
+                if ($concluido) {
+                    $prazo_cls = 'prazo-concluido';
+                    $prazo_txt = '✓ Concluído';
+                } elseif ($diff_dias < 0) {
+                    $prazo_cls = 'prazo-vencido';
+                    $prazo_txt = 'Vencido ' . abs($diff_dias) . 'd atrás';
+                } elseif ($diff_dias === 0) {
+                    $prazo_cls = 'prazo-hoje';
+                    $prazo_txt = 'Hoje às ' . $dt->format('H:i');
+                } elseif ($diff_dias === 1) {
+                    $prazo_cls = 'prazo-amanha';
+                    $prazo_txt = 'Amanhã às ' . $dt->format('H:i');
+                } else {
+                    $prazo_cls = 'prazo-ok';
+                    $prazo_txt = $dt->format('d/m/Y \à\s H:i');
+                }
+            ?>
+            <div class="lembrete-item <?php echo $concluido ? 'concluido' : ''; ?>">
+                <div class="lembrete-ico <?php echo $info['cls']; ?>"><?php echo $info['ico']; ?></div>
+                <div class="lembrete-corpo">
+                    <div class="lembrete-titulo"><?php echo htmlspecialchars($lem['titulo']); ?></div>
+                    <div class="lembrete-meta">
+                        <span><?php echo $info['label']; ?></span>
+                        <span class="lembrete-prazo <?php echo $prazo_cls; ?>"><?php echo $prazo_txt; ?></span>
+                    </div>
+                </div>
+                <?php if (!$concluido && $pode_editar_leads): ?>
+                <div class="lembrete-acoes">
+                    <form action="lembrete_salvar.php" method="post" style="display:inline;">
+                        <input type="hidden" name="acao" value="concluir">
+                        <input type="hidden" name="id" value="<?php echo $lem['id']; ?>">
+                        <input type="hidden" name="lead_id" value="<?php echo $id; ?>">
+                        <button type="submit" class="btn btn-secondary btn-sm" title="Marcar como concluído">✓</button>
+                    </form>
+                    <form action="lembrete_salvar.php" method="post" style="display:inline;">
+                        <input type="hidden" name="acao" value="excluir">
+                        <input type="hidden" name="id" value="<?php echo $lem['id']; ?>">
+                        <input type="hidden" name="lead_id" value="<?php echo $id; ?>">
+                        <button type="submit" class="btn btn-danger btn-sm"
+                            onclick="return confirm('Excluir este lembrete?')" title="Excluir">✕</button>
+                    </form>
+                </div>
+                <?php endif; ?>
+            </div>
+            <?php endwhile; ?>
+        </div>
+        <?php endif; ?>
+
+        <?php endif; // fim das abas ?>
+
+        <!-- ============================================================
+             ABA 5: LOG DE ATIVIDADES
+             ============================================================ -->
+        <?php if ($aba_ativa === 'log'): ?>
+
+        <div class="secao-titulo">
+            Histórico de atividades <span class="count"><?php echo $total_log; ?></span>
+        </div>
+
+        <?php if ($total_log === 0): ?>
+            <div class="card">
+                <div class="empty-state">
+                    <strong>Nenhuma atividade registrada</strong>
+                    As ações neste lead aparecerão aqui automaticamente
+                </div>
+            </div>
+        <?php else: ?>
+        <div class="card">
+            <div class="log-lista">
+            <?php while ($entry = mysqli_fetch_assoc($log_atividades)):
+                $cor = cor_log($entry['acao']);
+                $ico = icone_log($entry['acao']);
+                $txt = texto_acao($entry['acao']);
+
+                // Formata a data de forma relativa
+                $dt   = new DateTime($entry['criado_em']);
+                $ago  = new DateTime();
+                $diff = $ago->diff($dt);
+                if ($diff->days === 0) {
+                    $quando = 'hoje às ' . $dt->format('H:i');
+                } elseif ($diff->days === 1) {
+                    $quando = 'ontem às ' . $dt->format('H:i');
+                } elseif ($diff->days < 7) {
+                    $quando = 'há ' . $diff->days . ' dias';
+                } else {
+                    $quando = $dt->format('d/m/Y \à\s H:i');
+                }
+            ?>
+            <div class="log-item">
+                <div class="log-ico" style="background:<?php echo $cor['bg']; ?>;color:<?php echo $cor['fg']; ?>;">
+                    <?php echo $ico; ?>
+                </div>
+                <div class="log-corpo">
+                    <div class="log-linha-1">
+                        <strong><?php echo htmlspecialchars($entry['usuario']); ?></strong>
+                        <?php echo $txt; ?>
+                    </div>
+                    <?php if (!empty($entry['detalhe'])): ?>
+                    <div class="log-detalhe"><?php echo htmlspecialchars($entry['detalhe']); ?></div>
+                    <?php endif; ?>
+                </div>
+                <div class="log-data"><?php echo $quando; ?></div>
+            </div>
+            <?php endwhile; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <?php endif; // fim aba log ?>
 
     </div>
 </div>

@@ -6,6 +6,7 @@
 session_start();
 require_once 'config/db.php';
 require_once 'config/permissoes.php';
+require_once 'config/log.php';
 requer_permissao('editar_leads');
 
 $id      = isset($_GET['id'])      && is_numeric($_GET['id'])      ? (int)$_GET['id']      : 0;
@@ -34,16 +35,15 @@ $doc = mysqli_fetch_assoc($r);
 $caminho = __DIR__ . '/uploads/' . $doc['nome_arquivo'];
 
 // Apaga o arquivo físico do servidor
-// file_exists() verifica se o arquivo existe antes de tentar apagar
 if (file_exists($caminho)) {
     unlink($caminho);
-    // unlink() = função PHP para deletar um arquivo
 }
-
 // Apaga o registro do banco
 mysqli_query($conexao,
     "DELETE FROM documentos WHERE id = $id AND lead_id = $lead_id"
 );
+registrar_log($conexao, $lead_id, 'arquivo_removido',
+    "\"" . $doc['nome_original'] . "\"");
 
 // Volta para a aba de documentos do lead
 header("Location: leads_editar.php?id=$lead_id#documentos");
